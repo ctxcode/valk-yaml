@@ -1,0 +1,355 @@
+use valk.json
+
+/// Writes a `json.Value` as a YAML document in block style.
+///
+/// A string is quoted only when it has to be: when it would read back as something else, such
+/// as `"true"`, `"1.0"` or `"null"`, or holds characters that mean something in YAML. A string of
+/// several lines is written as a literal block (`|`). An empty mapping or sequence is written as
+/// `{}` or `[]`.
+///
+/// ```valk
+/// fs.write("config.yaml", yaml.encode(document)) ! panic("%{E.message}")
+/// ```
++ fn encode(value: json.Value) String {
+    let out = ByteBuffer.new(256)
+    write_document(out, value)
+    return out.into_string()
+}
+
+/// Writes several YAML documents, with `---` between them.
++ fn encode_all(documents: Array[json.Value]) String {
+    let out = ByteBuffer.new(256)
+    each documents as document, index {
+        if index > 0 : out.write("---\n")
+        write_document(out, document)
+    }
+    return out.into_string()
+}
+
+/// Writes a class or struct of your own as YAML, the way `json.from` would read it; a
+/// `time.DateTime` field is written as a date and time in UTC.
++ fn encode_of(value: $T) String {
+    return encode(value_from(value, Array[uint]{}))
+}
+
+fn write_document(out: ByteBuffer, value: json.Value) {
+    match value {
+        json.ObjectValue as object => {
+            if object.values.length == 0 : out.write("{}\n")
+            else : write_entries(out, object, 0, false)
+        }
+        json.ArrayValue as array => {
+            if array.values.length == 0 : out.write("[]\n")
+            else : write_items(out, array, 0, false)
+        }
+        String as text => {
+            // A literal block at the top needs no indent indicator
+            if is_literal_ok(text) && !needs_indent_indicator(text) {
+                write_literal(out, text, 2)
+                return
+            }
+            write_scalar(out, value)
+            out.write_byte('\n')
+        }
+        default => {
+            write_scalar(out, value)
+            out.write_byte('\n')
+        }
+    }
+}
+
+// The keys of a mapping at `indent`; with `inline` the first one goes on the current line
+fn write_entries(out: ByteBuffer, object: json.ObjectValue, indent: uint, inline: bool) {
+    let first = true
+    each object.values as value, key {
+        if !first || !inline : out.fill(' ', indent)
+        first = false
+        write_string(out, key)
+        out.write_byte(':')
+        match value {
+            json.ObjectValue as child => {
+                if child.values.length == 0 {
+                    out.write(" {}\n")
+                } else {
+                    out.write_byte('\n')
+                    write_entries(out, child, indent + 2, false)
+                }
+            }
+            json.ArrayValue as array => {
+                if array.values.length == 0 {
+                    out.write(" []\n")
+                } else {
+                    out.write_byte('\n')
+                    write_items(out, array, indent + 2, false)
+                }
+            }
+            default => write_inline(out, value, indent)
+        }
+    }
+}
+
+// The items of a sequence, their `-` at `indent`
+fn write_items(out: ByteBuffer, array: json.ArrayValue, indent: uint, inline: bool) {
+    each array.values as item, index {
+        if index > 0 || !inline : out.fill(' ', indent)
+        out.write_byte('-')
+        match item {
+            json.ObjectValue as object => {
+                if object.values.length == 0 {
+                    out.write(" {}\n")
+                } else {
+                    out.write_byte(' ')
+                    write_entries(out, object, indent + 2, true)
+                }
+            }
+            json.ArrayValue as nested => {
+                if nested.values.length == 0 {
+                    out.write(" []\n")
+                } else {
+                    out.write_byte(' ')
+                    write_items(out, nested, indent + 2, true)
+                }
+            }
+            default => write_inline(out, item, indent)
+        }
+    }
+}
+
+// A scalar after `key:` or `-`, whose collection is at `indent`
+fn write_inline(out: ByteBuffer, value: json.Value, indent: uint) {
+    match value {
+        String as text => {
+            if is_literal_ok(text) {
+                out.write_byte(' ')
+                write_literal(out, text, indent + 2)
+                return
+            }
+        }
+        default => {}
+    }
+    out.write_byte(' ')
+    write_scalar(out, value)
+    out.write_byte('\n')
+}
+
+fn write_scalar(out: ByteBuffer, value: json.Value) {
+    match value {
+        String as text => write_string(out, text)
+        int as number => out.write_int_ascii(number)
+        float as number => write_float(out, number)
+        bool as yes => out.write(yes ? "true" : "false")
+        default => out.write("null")
+    }
+}
+
+fn write_float(out: ByteBuffer, number: float) {
+    if number.is_nan() {
+        out.write(".nan")
+        return
+    }
+    if number.is_infinite() {
+        out.write(number > 0 ? ".inf" : "-.inf")
+        return
+    }
+    let start = out.length
+    out.write_f64_ascii_shortest(number, number >= 1e16 || number <= -1e16)
+    let has_dot = false
+    let i = start
+    while i < out.length {
+        let ch = out[i]
+        if ch == '.' : has_dot = true
+        if ch == 'e' {
+            // `1.0e+20`, which YAML 1.1 readers want: rare, so done the slow way
+            let text = out.range(start, out.length - start)
+            out.truncate(start)
+            let mantissa = text.range(0, i - start)
+            out.write(mantissa)
+            if !has_dot : out.write(".0")
+            out.write_byte('e')
+            let exponent = text.range(i - start + 1, text.length - (i - start) - 1)
+            if exponent[0] != '-' && exponent[0] != '+' : out.write_byte('+')
+            out.write(exponent)
+            return
+        }
+        i++
+    }
+    // `1.0`, not `1`, so it reads back as a float
+    if !has_dot : out.write(".0")
+}
+
+// `|`, `|-` or `|+` and the lines of `text`, indented to `indent`
+fn write_literal(out: ByteBuffer, text: String, indent: uint) {
+    out.write_byte('|')
+    if needs_indent_indicator(text) : out.write_byte('2')
+    let end = text.length
+    let trailing: uint = 0
+    while trailing < end && text[end - trailing - 1] == '\n' : trailing++
+    if trailing == 0 : out.write_byte('-')
+    else if trailing > 1 : out.write_byte('+')
+    out.write_byte('\n')
+    // The last line break is the one the chomping indicator keeps
+    if trailing > 0 : end--
+    let start: uint = 0
+    while true {
+        let stop = start
+        while stop < end && text[stop] != '\n' : stop++
+        if stop > start {
+            out.fill(' ', indent)
+            out.write(text.view(start, stop - start))
+        }
+        out.write_byte('\n')
+        if stop >= end : break
+        start = stop + 1
+    }
+}
+
+// A literal block reads back the same when the text is lines of printable characters
+fn is_literal_ok(text: String) bool {
+    if !text.contains_byte('\n') : return false
+    let has_text = false
+    let i: uint = 0
+    let n = text.length
+    while i < n {
+        let ch = text[i]
+        if ch < 0x20 && ch != '\n' && ch != '\t' : return false
+        if ch == 0x7f : return false
+        // NEL, LS and PS are line breaks to YAML 1.1 readers
+        if ch == 0xc2 && text[i + 1] == 0x85 : return false
+        if ch == 0xe2 && text[i + 1] == 0x80 && (text[i + 2] == 0xa8 || text[i + 2] == 0xa9) : return false
+        if ch == 0xef && text[i + 1] == 0xbb && text[i + 2] == 0xbf : return false
+        if ch != '\n' : has_text = true
+        i++
+    }
+    return has_text
+}
+
+// A first line with text that starts with a space would be taken for the block's indent
+fn needs_indent_indicator(text: String) bool {
+    each text as ch {
+        if ch != '\n' : return ch == ' ' || ch == '\t'
+    }
+    return false
+}
+
+fn write_string(out: ByteBuffer, text: String) {
+    if is_plain_ok(text) {
+        out.write(text)
+        return
+    }
+    out.write_byte('"')
+    let n = text.length
+    let run: uint = 0
+    let i: uint = 0
+    while i < n {
+        let ch = text[i]
+        let escape = ""
+        let skip: uint = 1
+        if ch == '"' : escape = "\\\""
+        else if ch == '\\' : escape = "\\\\"
+        else if ch == '\n' : escape = "\\n"
+        else if ch == '\t' : escape = "\\t"
+        else if ch == '\r' : escape = "\\r"
+        else if ch == 0 : escape = "\\0"
+        else if ch == 27 : escape = "\\e"
+        else if ch < 0x20 || ch == 0x7f : escape = "\\x" + hex_digit(ch >> 4).to_ascii_string() + hex_digit(ch & 0x0f).to_ascii_string()
+        else if ch == 0xc2 && text[i + 1] == 0x85 {
+            escape = "\\N"
+            skip = 2
+        } else if ch == 0xe2 && text[i + 1] == 0x80 && text[i + 2] == 0xa8 {
+            escape = "\\L"
+            skip = 3
+        } else if ch == 0xe2 && text[i + 1] == 0x80 && text[i + 2] == 0xa9 {
+            escape = "\\P"
+            skip = 3
+        } else if ch == 0xef && text[i + 1] == 0xbb && text[i + 2] == 0xbf {
+            escape = "\\ufeff"
+            skip = 3
+        }
+        if escape.length > 0 {
+            out.write(text.view(run, i - run))
+            out.write(escape)
+            i += skip
+            run = i
+            continue
+        }
+        i++
+    }
+    out.write(text.view(run, n - run))
+    out.write_byte('"')
+}
+
+fn hex_digit(value: u8) u8 {
+    if value < 10 : return '0' + value
+    return 'a' + (value - 10)
+}
+
+// Whether `text` reads back as itself without quotes, to YAML 1.2 and to YAML 1.1 readers
+fn is_plain_ok(text: String) bool {
+    let n = text.length
+    if n == 0 : return false
+    let first = text[0]
+    let last = text[n - 1]
+    if first == ' ' || first == '\t' || last == ' ' || last == '\t' || last == ':' : return false
+    if is_indicator(first) : return false
+    if text.starts_with("...") || text == "<<" : return false
+    if !resolve_plain(text).is_string : return false
+    if is_yaml11_word(text) || is_yaml11_number(text) : return false
+    let i: uint = 0
+    while i < n {
+        let ch = text[i]
+        if ch < 0x20 || ch == 0x7f : return false
+        if ch == ':' && text[i + 1] == ' ' : return false
+        if ch == ' ' && text[i + 1] == '#' : return false
+        if ch == 0xc2 && text[i + 1] == 0x85 : return false
+        if ch == 0xe2 && text[i + 1] == 0x80 && (text[i + 2] == 0xa8 || text[i + 2] == 0xa9) : return false
+        if ch == 0xef && text[i + 1] == 0xbb && text[i + 2] == 0xbf : return false
+        i++
+    }
+    return true
+}
+
+fn is_indicator(ch: u8) bool {
+    return ch == '-' || ch == '?' || ch == ':' || ch == ',' || ch == '[' || ch == ']' || ch == '{' || ch == '}' || ch == '#' || ch == '&' || ch == '*' || ch == '!' || ch == '|' || ch == '>' || ch == '\'' || ch == '"' || ch == '%' || ch == '@' || ch == '`'
+}
+
+// Bools to YAML 1.1, as PyYAML reads them
+fn is_yaml11_word(text: String) bool {
+    let n = text.length
+    if n < 2 || n > 3 : return false
+    let a = text[0] | 0x20
+    let b = text[1] | 0x20
+    if n == 2 : return (a == 'n' && b == 'o') || (a == 'o' && b == 'n')
+    let c = text[2] | 0x20
+    return (a == 'y' && b == 'e' && c == 's') || (a == 'o' && b == 'f' && c == 'f')
+}
+
+// Numbers and dates to YAML 1.1: `1_000`, `0b101`, `012`, `1:30`, `1.`, `2001-12-14`
+fn is_yaml11_number(text: String) bool {
+    let n = text.length
+    let i: uint = (text[0] == '+' || text[0] == '-') ? 1 : 0
+    if text[i] == '0' && (text[i + 1] == 'b' || text[i + 1] == 'x') && n > i + 2 {
+        let binary = text[i + 1] == 'b'
+        i += 2
+        while i < n {
+            let ch = text[i]
+            if ch != '_' && (binary ? (ch != '0' && ch != '1') : hex_value(ch) > 15) : return false
+            i++
+        }
+        return true
+    }
+    // A date, maybe with a time after it
+    if n >= 8 && is_digit(text[0]) && is_digit(text[1]) && is_digit(text[2]) && is_digit(text[3]) && text[4] == '-' : return true
+    // Digits with `_`, `:` and one `.`, then maybe an exponent
+    let digits = false
+    let dots: uint = 0
+    while i < n {
+        let ch = text[i]
+        if is_digit(ch) : digits = true
+        else if ch == '.' : dots++
+        else if ch != '_' && ch != ':' : break
+        i++
+    }
+    if !digits || dots > 1 : return false
+    if i < n && (text[i] == 'e' || text[i] == 'E') : return true
+    return i == n
+}

@@ -1,0 +1,76 @@
+use yaml
+use valk.json
+
+// The samples in python-samples.valk come from PyYAML and ruamel.yaml; crosscheck.py makes them.
+
+test "Reads what PyYAML reads" {
+    let all_match = true
+    each python_samples() as sample, index {
+        let documents = yaml.decode_all(sample.text) ! {
+            if sample.json.length > 0 {
+                println("sample " + index + " \"" + sample.text.escape() + "\": " + E.message + " at line " + E.line)
+                all_match = false
+            }
+            continue
+        }
+        if sample.json.length == 0 {
+            println("sample " + index + " \"" + sample.text.escape() + "\" is refused by Python, read as " + show(documents))
+            all_match = false
+            continue
+        }
+        let expected = json.decode(sample.json) ! {
+            println("sample " + index + ": bad JSON")
+            all_match = false
+            continue
+        }
+        let got = show(documents)
+        let want = show_value(expected)
+        if got != want {
+            println("sample " + index + " \"" + sample.text.escape() + "\" read as " + got + ", Python " + want)
+            all_match = false
+            continue
+        }
+        // What encode writes reads back the same
+        let written = yaml.encode_all(documents)
+        let again = yaml.decode_all(written) ! {
+            println("sample " + index + ": wrote \"" + written.escape() + "\", which does not read: " + E.message)
+            all_match = false
+            continue
+        }
+        if show(again) != got {
+            println("sample " + index + ": wrote \"" + written.escape() + "\", which reads as " + show(again) + ", not " + got)
+            all_match = false
+        }
+    }
+    assert(all_match)
+}
+
+fn show(documents: Array[json.Value]) String {
+    return show_value(json.new_array(documents))
+}
+
+// JSON, with markers for the floats JSON has no text for, as crosscheck.py writes them
+fn show_value(value: json.Value) String {
+    return json.encode(mark_specials(value))
+}
+
+fn mark_specials(value: json.Value) json.Value {
+    match value {
+        float as number => {
+            if number.is_nan() : return "<nan>"
+            if number.is_infinite() : return number > 0 ? "<inf>" : "<-inf>"
+            return number
+        }
+        json.ArrayValue as array => {
+            let items = Array[json.Value]{}
+            each array.values as item : items.append(mark_specials(item))
+            return json.new_array(items)
+        }
+        json.ObjectValue as object => {
+            let members = Map[json.Value]{}
+            each object.values as item, key : members.set(key, mark_specials(item))
+            return json.new_object(members)
+        }
+        default => return value
+    }
+}

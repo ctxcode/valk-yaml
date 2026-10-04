@@ -1,0 +1,331 @@
+use yaml
+
+test "Mappings and sequences" {
+    let document = yaml.decode("
+# a comment, and a blank line below
+
+name: valk
+server:
+  host: 127.0.0.1
+  port: 8080
+tags:
+  - web
+  - api
+same_indent:
+- 1
+- 2
+") ! { println(E.message + " at line " + E.line) assert(false) return }
+
+    assert(document["name"].string == "valk")
+    assert(document["server"]["host"].string == "127.0.0.1")
+    assert(document["server"]["port"].int == 8080)
+    assert(document["tags"].array.length == 2)
+    assert(document["tags"][1].string == "api")
+    assert(document["same_indent"][1].int == 2)
+}
+
+test "Compact nested forms" {
+    let document = yaml.decode("
+- a: 1
+  b: 2
+- - x
+  - y
+- - - deep
+-
+  c: 3
+") ! { println(E.message + " at line " + E.line) assert(false) return }
+
+    assert(document[0]["a"].int == 1)
+    assert(document[0]["b"].int == 2)
+    assert(document[1][1].string == "y")
+    assert(document[2][0][0].string == "deep")
+    assert(document[3]["c"].int == 3)
+}
+
+test "Core schema" {
+    let document = yaml.decode("
+null_word: null
+tilde: ~
+empty:
+yes_word: yes
+true_word: true
+False_word: False
+int: 42
+negative: -17
+plus: +3
+octal: 0o17
+hex: 0x1F
+leading_zero: 017
+float: 1.5
+exponent: 1e3
+dot: .5
+inf: .inf
+negative_inf: -.Inf
+nan: .NaN
+version: 1.2.3
+quoted_int: \"42\"
+big: 99999999999999999999
+") ! { println(E.message) assert(false) return }
+
+    assert(document["null_word"].is_null)
+    assert(document["tilde"].is_null)
+    assert(document.has("empty") && document["empty"].is_null)
+    assert(document["yes_word"].string == "yes")
+    assert(document["true_word"].bool)
+    assert(document["False_word"].is_bool && !document["False_word"].bool)
+    assert(document["int"].int == 42)
+    assert(document["negative"].int == -17)
+    assert(document["plus"].int == 3)
+    assert(document["octal"].int == 15)
+    assert(document["hex"].int == 31)
+    assert(document["leading_zero"].int == 17)
+    assert(document["float"].is_float && document["float"].float == 1.5)
+    assert(document["exponent"].is_float && document["exponent"].float == 1000)
+    assert(document["dot"].float == 0.5)
+    assert(document["inf"].float.is_infinite() && document["inf"].float > 0)
+    assert(document["negative_inf"].float.is_infinite() && document["negative_inf"].float < 0)
+    assert(document["nan"].float.is_nan())
+    assert(document["version"].string == "1.2.3")
+    assert(document["quoted_int"].string == "42")
+    assert(document["big"].is_float)
+}
+
+test "Quoted scalars" {
+    let document = yaml.decode("
+single: 'it''s # not a comment'
+double: \"tab\\there\\nnew line \\\"quoted\\\" \\\\ slash\"
+escapes: \"\\x41\\u00e9\\U0001F600\\e\\0\\_\"
+pair: \"\\ud83d\\ude00\"
+folded: \"one
+  two
+
+  three\"
+escaped_break: \"one \\
+  two\"
+empty: ''
+") ! { println(E.message + " at line " + E.line) assert(false) return }
+
+    assert(document["single"].string == "it's # not a comment")
+    assert(document["double"].string == "tab\there\nnew line \"quoted\" \\ slash")
+    assert(document["escapes"].string == "Aé😀\x1b\x00\xc2\xa0")
+    assert(document["pair"].string == "😀")
+    assert(document["folded"].string == "one two\nthree")
+    assert(document["escaped_break"].string == "one two")
+    assert(document["empty"].string == "")
+}
+
+test "Plain scalars" {
+    let document = yaml.decode("
+url: http://example.com:8080/path
+colon: a:b
+hash: a#b
+spaced: value with spaces   # and a comment
+multi: one
+  two
+
+  three
+") ! { println(E.message) assert(false) return }
+
+    assert(document["url"].string == "http://example.com:8080/path")
+    assert(document["colon"].string == "a:b")
+    assert(document["hash"].string == "a#b")
+    assert(document["spaced"].string == "value with spaces")
+    assert(document["multi"].string == "one two\nthree")
+}
+
+test "Block scalars" {
+    let document = yaml.decode("
+literal: |
+  line one
+    indented
+  line three
+folded: >
+  folded
+  text
+
+  next
+    kept
+  end
+strip: |-
+  no break
+keep: |+
+  all breaks
+
+indicator: |2
+    two more
+  base
+after: 1
+") ! { println(E.message + " at line " + E.line) assert(false) return }
+
+    assert(document["literal"].string == "line one\n  indented\nline three\n")
+    assert(document["folded"].string == "folded text\nnext\n  kept\nend\n")
+    assert(document["strip"].string == "no break")
+    assert(document["keep"].string == "all breaks\n\n")
+    assert(document["indicator"].string == "  two more\nbase\n")
+    assert(document["after"].int == 1)
+}
+
+test "Flow collections" {
+    let document = yaml.decode("
+list: [1, two, \"three\", [4], {five: 5}]
+map: {a: 1, b: [x, y], 'c': {d: e}}
+json: {\"a\":1,\"b\":[true,null]}
+multi_line: [
+  one,
+  two,
+]
+pairs: [a: 1, b: 2]
+no_value: {a, b}
+empty: [[], {}]
+") ! { println(E.message + " at line " + E.line) assert(false) return }
+
+    assert(document["list"].array.length == 5)
+    assert(document["list"][1].string == "two")
+    assert(document["list"][3][0].int == 4)
+    assert(document["list"][4]["five"].int == 5)
+    assert(document["map"]["b"][1].string == "y")
+    assert(document["map"]["c"]["d"].string == "e")
+    assert(document["json"]["b"][0].bool)
+    assert(document["multi_line"].array.length == 2)
+    assert(document["pairs"][1]["b"].int == 2)
+    assert(document["no_value"].has("b") && document["no_value"]["b"].is_null)
+    assert(document["empty"][0].array.length == 0)
+}
+
+test "Anchors, aliases and merge keys" {
+    let document = yaml.decode("
+base: &base
+  host: localhost
+  port: 80
+extra: &extra {debug: true, port: 81}
+dev:
+  <<: *base
+  port: 8080
+both:
+  <<: [*base, *extra]
+copy: *base
+scalar: &s hello
+again: *s
+quoted: {\"<<\": 1}
+") ! { println(E.message + " at line " + E.line) assert(false) return }
+
+    assert(document["dev"]["host"].string == "localhost")
+    assert(document["dev"]["port"].int == 8080)
+    // The first mapping in the list wins
+    assert(document["both"]["port"].int == 80)
+    assert(document["both"]["debug"].bool)
+    assert(document["copy"]["port"].int == 80)
+    assert(document["again"].string == "hello")
+    assert(document["quoted"]["<<"].int == 1)
+}
+
+test "Keys" {
+    let document = yaml.decode("
+1: one
+true: yes
+\"quoted key\": 2
+'single': 3
+a b: 4
+? explicit
+: 5
+? |
+  block key
+: 6
+: empty key
+") ! { println(E.message + " at line " + E.line) assert(false) return }
+
+    // Keys are text, as written
+    assert(document["1"].string == "one")
+    assert(document["true"].string == "yes")
+    assert(document["quoted key"].int == 2)
+    assert(document["single"].int == 3)
+    assert(document["a b"].int == 4)
+    assert(document["explicit"].int == 5)
+    assert(document["block key\n"].int == 6)
+    assert(document[""].string == "empty key")
+}
+
+test "Tags" {
+    let document = yaml.decode("
+\%TAG !e! tag:example.com,2000:
+---
+str: !!str 123
+int: !!int \"42\"
+float: !!float 1
+bool: !!bool \"true\"
+null: !!null \"\"
+empty_str: !!str
+non_specific: ! 12
+custom: !thing 12
+handle: !e!thing 7
+verbatim: !<tag:yaml.org,2002:str> 5
+map: !!map {a: 1}
+") ! { println(E.message + " at line " + E.line) assert(false) return }
+
+    assert(document["str"].string == "123")
+    assert(document["int"].int == 42)
+    assert(document["float"].is_float)
+    assert(document["bool"].bool)
+    assert(document["null"].is_null)
+    assert(document["empty_str"].is_string && document["empty_str"].string == "")
+    assert(document["non_specific"].string == "12")
+    // A tag this package does not know keeps the text
+    assert(document["custom"].string == "12")
+    assert(document["handle"].string == "7")
+    assert(document["verbatim"].string == "5")
+    assert(document["map"]["a"].int == 1)
+}
+
+test "Documents" {
+    let documents = yaml.decode_all("
+\%YAML 1.2
+---
+a: 1
+...
+---
+b: 2
+--- just text
+---
+") ! { println(E.message + " at line " + E.line) assert(false) return }
+
+    assert(documents.length == 4)
+    assert(documents[0]["a"].int == 1)
+    assert(documents[1]["b"].int == 2)
+    assert(documents[2].string == "just text")
+    assert(documents[3].is_null)
+
+    // decode reads one document
+    let single = yaml.decode("--- 5\n...\n") ! { assert(false) return }
+    assert(single.int == 5)
+    let empty = yaml.decode("# nothing\n") ! { assert(false) return }
+    assert(empty.is_null)
+    let none = yaml.decode_all("") ! { assert(false) return }
+    assert(none.length == 0)
+}
+
+test "Line ends, byte order mark and tabs" {
+    let document = yaml.decode("\xef\xbb\xbfa: 1\r\nb:\r\n  - x\r\nc: |\r\n  text\r\n") ! { println(E.message) assert(false) return }
+    assert(document["a"].int == 1)
+    assert(document["b"][0].string == "x")
+    assert(document["c"].string == "text\n")
+
+    let tabs = yaml.decode("a:\tvalue\t# comment\nb: [1,\t2]\n") ! { println(E.message) assert(false) return }
+    assert(tabs["a"].string == "value")
+    assert(tabs["b"][1].int == 2)
+}
+
+test "Deep nesting" {
+    let text = "[".repeat(200) + "]".repeat(200)
+    let document = yaml.decode(text) ! { println(E.message) assert(false) return }
+    assert(document.is_array)
+
+    let block = ByteBuffer.new(4096)
+    let i: uint = 0
+    while i < 120 {
+        block.fill(' ', i * 2)
+        block.write("k:\n")
+        i++
+    }
+    let nested = yaml.decode(block.to_string()) ! { println(E.message) assert(false) return }
+    assert(nested["k"]["k"]["k"].is_object)
+}

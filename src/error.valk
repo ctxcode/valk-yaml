@@ -1,0 +1,15 @@
+/// Thrown when text is not YAML, or does not fit what it is read into.
+///
+/// - `syntax`: the text does not read as YAML.
+/// - `duplicate`: a mapping has the same key twice.
+/// - `type`: a value is not what its tag or the type it is read into needs.
+/// - `limit`: aliases expand to too many values, or values nest too deep.
+///
+/// `line` and `column` say where the reader stopped, counting from one, so the message can be
+/// shown against the file. They are 0 for `type` errors from `decode_to`, whose message names the
+/// key instead.
++ error Error (syntax, duplicate, type, limit) payload {
+    message: String
+    line: uint (0)
+    column: uint (0)
+}

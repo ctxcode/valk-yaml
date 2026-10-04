@@ -1,0 +1,8 @@
+{
+    "src": ".",
+    "dependencies": {
+        "yaml": {
+            "src": "../"
+        }
+    }
+}

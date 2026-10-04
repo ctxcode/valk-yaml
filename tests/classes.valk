@@ -1,0 +1,122 @@
+use yaml
+use valk.time
+
+class Server {
+    host: String ("127.0.0.1")
+    port: uint (8080)
+}
+
+class Settings {
+    name: String
+    debug: bool (false)
+    ratio: f64 (1.0)
+    tags: Array[String] (.{})
+    limits: Map[uint] (.{})
+    note: ?String
+    server: Server
+    servers: Array[Server] (.{})
+}
+
+test "Decoding into classes" {
+    let settings = yaml.decode_to[Settings]("
+name: the service
+debug: true
+ratio: 2
+tags: [web, api]
+limits:
+  users: 10
+  jobs: 3
+server:
+  port: 9000
+servers:
+  - host: a.example.com
+  - host: b.example.com
+    port: 81
+") ! { println(E.message) assert(false) return }
+
+    assert(settings.name == "the service")
+    assert(settings.debug)
+    assert(settings.ratio == 2.0)
+    assert(settings.tags.length == 2 && settings.tags[1] == "api")
+    assert((settings.limits.get("jobs") !? 0) == 3)
+    assert(!isset(settings.note))
+    assert(settings.server.host == "127.0.0.1")
+    assert(settings.server.port == 9000)
+    assert(settings.servers.length == 2)
+    assert(settings.servers[1].port == 81)
+    assert(settings.servers[0].port == 8080)
+}
+
+test "Fields that do not fit name their key" {
+    yaml.decode_to[Settings]("debug: true\nserver: {}\n") ! {
+        assert(error_is(E.code, type))
+        assert(E.message == "'name' is missing")
+        return
+    }
+    assert(false)
+}
+
+test "Fields of the wrong type name their key" {
+    yaml.decode_to[Settings]("name: x\nserver:\n  port: high\n") ! {
+        assert(error_is(E.code, type))
+        assert(E.message.contains("'server.port'"))
+        return
+    }
+    assert(false)
+}
+
+test "A syntax error still says where" {
+    yaml.decode_to[Settings]("name: [x\n") ! {
+        assert(error_is(E.code, syntax))
+        assert(E.line == 1)
+        return
+    }
+    assert(false)
+}
+
+class Event {
+    title: String
+    at: time.DateTime
+    until: ?time.DateTime
+    days: Array[time.DateTime] (.{})
+}
+
+test "Dates and times" {
+    let event = yaml.decode_to[Event]("
+title: launch
+at: 2001-12-14t21:59:43.10-05:00
+until: 2001-12-15 2:59:43.10
+days: [2002-12-14, 2002-12-15T10:00:00Z]
+") ! { println(E.message) assert(false) return }
+
+    assert(event.at.year() == 2001 && event.at.day() == 15 && event.at.hour() == 2 && event.at.minute() == 59)
+    assert(event.at.microsecond() == 100000)
+    let until = event.until ?! { assert(false) return }
+    assert(until.hour() == 2)
+    assert(event.days.length == 2 && event.days[1].hour() == 10)
+
+    // And back out, as UTC
+    let text = yaml.encode_of(event)
+    let again = yaml.decode_to[Event](text) ! { println(E.message) assert(false) return }
+    assert(again.at.to_iso8601() == event.at.to_iso8601())
+}
+
+test "Encoding classes" {
+    let settings = Settings {
+        name: "yes"
+        tags: .{ "a", "b" }
+        note: null
+        server: Server { host: "0.0.0.0", port: 9000 }
+    }
+    let text = yaml.encode_of(settings)
+    assert(text.contains("name: \"yes\"\n"))
+    assert(text.contains("tags:\n  - a\n  - b\n"))
+    assert(text.contains("server:\n  host: 0.0.0.0\n  port: 9000\n"))
+    assert(text.contains("ratio: 1.0\n"))
+
+    let again = yaml.decode_to[Settings](text) ! { println(E.message) assert(false) return }
+    assert(again.name == "yes")
+    assert(again.ratio == 1.0)
+    assert(again.server.host == "0.0.0.0")
+    assert(!isset(again.note))
+}

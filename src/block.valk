@@ -1,0 +1,319 @@
+use valk.json
+
+// Block style: mappings and sequences laid out by indentation.
+
+extend Parser {
+
+    // The value after `key:`, after `- ` or at the start of a document. `parent` is the indent of
+    // the collection it belongs to; a value on the lines below must be indented further, except
+    // for a sequence under a key (`in_map`), which may sit at the key's own indent. `compact`
+    // allows a mapping or sequence to start on this line.
+    fn parse_value(parent: int, in_map: bool, compact: bool) json.Value !Error {
+        this.skip_spaces()
+        let start = this.at
+        let props = this.read_props() !>
+        if this.at_line_end() {
+            let indent = this.next_content() !>
+            if indent > parent : return this.parse_node(parent, indent, true, props, in_map) !>
+            if indent == parent && in_map && this.at_entry() {
+                let before = this.nodes
+                this.enter() !>
+                let items = this.parse_block_sequence(indent) !>
+                this.depth--
+                return this.finish(props, items, before) !>
+            }
+            return this.empty_value(props) !>
+        }
+        // Properties on the same line as the value are read again with it, as they may belong
+        // to a key
+        this.at = start
+        return this.parse_node(parent, this.column(), compact, Props{}, false) !>
+    }
+
+    // A node starting at the cursor, in column `col`. `compact` allows a mapping or sequence to
+    // start on this line, as after `- `. `outer` are properties from the line above, and
+    // `in_map` allows a sequence below them at the indent of the key they follow.
+    fn parse_node(parent: int, col: int, compact: bool, outer: Props, in_map: bool) json.Value !Error {
+        this.enter() !>
+        let before = this.nodes
+        let start = this.at
+        let props = this.read_props() !>
+        let conflict = (props.anchor.length > 0 && outer.anchor.length > 0) || (props.tag.length > 0 && outer.tag.length > 0)
+        if props.anchor.length == 0 : props.anchor = outer.anchor
+        if props.tag.length == 0 : props.tag = outer.tag
+
+        // Properties alone on their line belong to the value below
+        if start != this.at && this.at_line_end() {
+            if conflict : this.fail_at(start, "A value has two anchors or two tags")
+            let indent = this.next_content() !>
+            let value: json.Value = null
+            if indent > parent {
+                value = this.parse_node(parent, indent, true, props, in_map) !>
+            } else if indent == parent && in_map && this.at_entry() {
+                value = this.finish(props, this.parse_block_sequence(indent) !>, before) !>
+            } else {
+                value = this.empty_value(props) !>
+            }
+            this.depth--
+            return value
+        }
+
+        let ch = this.peek()
+        let next = this.peek_at(1)
+        let value: json.Value = null
+        let key_line = !(ch == '-' && is_blank(next)) && ch != '|' && ch != '>' && ch != '[' && ch != '{' && this.line_has_key()
+        if conflict && !key_line : this.fail_at(start, "A value has two anchors or two tags")
+        if ch == '-' && is_blank(next) {
+            if !compact : this.fail("A sequence cannot start on the same line as its key")
+            if start != this.at : this.fail_at(start, "Properties cannot go before a sequence entry on its line")
+            value = this.parse_block_sequence(col) !>
+        } else if ch == '?' && is_blank(next) {
+            if !compact : this.fail("A mapping cannot start on the same line as its key")
+            if start != this.at : this.fail_at(start, "Properties cannot go before a '? ' key on its line")
+            value = this.parse_block_mapping(col) !>
+        } else if ch == '|' || ch == '>' {
+            value = this.read_block_scalar(parent, props.tag) !>
+        } else if ch == '[' || ch == '{' {
+            value = this.flow_node() !>
+            this.skip_spaces()
+            if this.peek() == ':' && is_blank(this.peek_at(1)) : this.fail("A flow collection cannot be a key: complex keys are not supported")
+        } else if key_line {
+            if !compact : this.fail("A mapping cannot start on the same line as its key")
+            // Properties on the key's line belong to the key
+            this.at = start
+            let map = this.parse_block_mapping(col) !>
+            this.depth--
+            return this.finish(outer, map, before) !>
+        } else if ch == '*' {
+            if start != this.at : this.fail_at(start, "An alias cannot have an anchor or a tag")
+            value = this.read_alias() !>
+        } else if ch == '"' || ch == '\'' {
+            let text = this.read_quoted(ch) !>
+            value = this.scalar_value(text, false, props.tag) !>
+        } else {
+            this.check_plain_start(false) !>
+            value = this.scalar_value(this.read_block_plain(parent) !>, true, props.tag) !>
+        }
+        this.depth--
+        return this.finish(props, value, before) !>
+    }
+
+    // Whether the scalar or alias at the cursor is followed by `: ` on its line. Leaves the
+    // cursor where it was.
+    fn line_has_key() bool !Error {
+        let start = this.at
+        let ch = this.peek()
+        if ch == '*' {
+            this.at++
+            this.read_name()
+        } else if ch == '"' || ch == '\'' {
+            let line = this.line_of_quote()
+            if !line {
+                this.at = start
+                return false
+            }
+        } else {
+            this.scan_plain_line(false)
+        }
+        this.skip_spaces()
+        let found = this.peek() == ':' && is_blank(this.peek_at(1))
+        this.at = start
+        return found
+    }
+
+    // Moves past a quoted scalar that closes on this line; false when it does not
+    fn line_of_quote() bool {
+        let text = this.text
+        let quote = text[this.at]
+        let at = this.at + 1
+        while true {
+            let ch = text[at]
+            if at >= text.length || ch == '\n' || ch == '\r' : return false
+            if ch == quote {
+                if quote == '\'' && text[at + 1] == '\'' {
+                    at += 2
+                    continue
+                }
+                this.at = at + 1
+                return true
+            }
+            if ch == '\\' && quote == '"' : at++
+            at++
+        }
+    }
+
+    // `key: value` lines in column `col`, starting at the first key
+    fn parse_block_mapping(col: int) json.Value !Error {
+        let entries = Map[json.Value]{}
+        let merges: ?Array[json.Value] = null
+        while true {
+            let key_at = this.at
+            let plain = false
+            let key = ""
+            let value: json.Value = null
+            if this.peek() == '?' && is_blank(this.peek_at(1)) {
+                // `? key` and, on a line of its own, `: value`
+                this.at++
+                key = this.read_explicit_key(col) !>
+                let indent = this.next_content() !>
+                if indent == col && this.peek() == ':' && is_blank(this.peek_at(1)) {
+                    this.at++
+                    value = this.parse_value(col, true, true) !>
+                } else {
+                    value = this.scalar_value("", true, "") !>
+                }
+            } else {
+                plain = this.read_key() !>
+                key = this.scalar_text ?? ""
+                this.at++ // `:`
+                value = this.parse_value(col, true, false) !>
+            }
+            if plain && key == "<<" {
+                this.check_merge(value, key_at) !>
+                let list = merges ?? Array[json.Value]{}
+                list.append(value)
+                merges = list
+            } else {
+                if entries.has(key) : this.fail_duplicate(key_at, key)
+                entries.set(key, value)
+            }
+            let indent = this.next_content() !>
+            if indent < col : break
+            if indent > col : this.fail("This line is indented further than the keys of its mapping")
+        }
+        return this.build_map(entries, merges)
+    }
+
+    // An implicit key up to its `:`, which it leaves the cursor on. The key's text goes in
+    // `scalar_text`; returns whether it was a plain scalar.
+    fn read_key() bool !Error {
+        let before = this.nodes
+        let props = this.read_props() !>
+        let ch = this.peek()
+        let next = this.peek_at(1)
+        let plain = false
+        let key = ""
+        if ch == ':' && is_blank(next) {
+            // An empty key
+        } else if ch == '*' {
+            if props.anchor.length > 0 || props.tag.length > 0 : this.fail("An alias cannot have an anchor or a tag")
+            key = this.key_of(this.read_alias() !>) !>
+        } else if ch == '"' || ch == '\'' {
+            let start = this.at
+            key = this.read_quoted(ch) !>
+            each this.text.range(start, this.at - start) as c {
+                if c == '\n' || c == '\r' : this.fail_at(start, "A key must be on one line")
+            }
+        } else if ch == '-' && is_blank(next) {
+            this.fail("Expected a key, found a sequence entry")
+        } else if ch == '?' && is_blank(next) {
+            this.fail("Properties cannot go before a '? ' key on its line")
+        } else if ch == '[' || ch == '{' {
+            this.fail("A flow collection cannot be a key: complex keys are not supported")
+        } else if ch == '|' || ch == '>' {
+            this.fail("A block scalar cannot be a key")
+        } else {
+            this.check_plain_start(false) !>
+            let start = this.at
+            let end = this.scan_plain_line(false)
+            key = this.text.range(start, end - start)
+            plain = props.tag.length == 0
+        }
+        this.skip_spaces()
+        if this.peek() != ':' || !is_blank(this.peek_at(1)) {
+            if this.at_line_end() : this.fail("Expected ':' after the key '" + key + "'")
+            this.fail("Expected ':' after the key '" + key + "', found '" + show_byte(this.peek()) + "'")
+        }
+        if props.anchor.length > 0 {
+            this.nodes++
+            this.finish(props, this.scalar_value(key, plain, props.tag) !>, before) !>
+        }
+        this.scalar_text = key
+        return plain
+    }
+
+    // The key after `? `, which may be any scalar
+    fn read_explicit_key(col: int) String !Error {
+        let key_at = this.at
+        this.scalar_text = null
+        let key = this.parse_value(col, false, true) !>
+        if key.is_array || key.is_object : this.fail_at(key_at, "A mapping or sequence cannot be a key: complex keys are not supported")
+        return this.scalar_text ?? (this.key_of(key) !>)
+    }
+
+    // `- item` lines in column `col`, starting at the first `-`
+    fn parse_block_sequence(col: int) json.Value !Error {
+        let items = Array[json.Value]{}
+        while true {
+            this.at++ // `-`
+            items.append(this.parse_value(col, false, true) !>)
+            let indent = this.next_content() !>
+            if indent > col : this.fail("This line is indented further than the entries of its sequence")
+            if indent < col || !this.at_entry() : break
+        }
+        this.nodes++
+        return json.new_array(items)
+    }
+
+    // A value that is not there: null, or the empty string for `!!str`
+    fn empty_value(props: Props) json.Value !Error {
+        let before = this.nodes
+        let value = this.scalar_value("", true, props.tag) !>
+        return this.finish(props, value, before) !>
+    }
+
+    // What a key that is an alias reads as
+    fn key_of(value: json.Value) String !Error {
+        match value {
+            String as text => return text
+            int as number => return number.to_string()
+            float as number => return number.to_shortest_string()
+            bool as yes => return yes ? "true" : "false"
+            null => return ""
+            default => this.fail("A mapping or sequence cannot be a key: complex keys are not supported")
+        }
+    }
+
+    // `<<` takes a mapping, or a sequence of mappings
+    fn check_merge(value: json.Value, pos: uint) !Error {
+        match value {
+            json.ObjectValue as _ => return
+            json.ArrayValue as list => {
+                each list.values as item {
+                    if !item.is_object : this.fail_at(pos, "A merge key ('<<') takes a mapping or a list of mappings")
+                }
+                return
+            }
+            default => this.fail_at(pos, "A merge key ('<<') takes a mapping or a list of mappings")
+        }
+    }
+
+    // The mapping with its merged keys first, as PyYAML orders them; its own keys win
+    fn build_map(entries: Map[json.Value], merges: ?Array[json.Value]) json.Value {
+        this.nodes++
+        if !isset(merges) : return json.new_object(entries)
+        let result = Map[json.Value]{}
+        each merges as merge {
+            match merge {
+                json.ObjectValue as object => merge_into(result, object)
+                json.ArrayValue as list => {
+                    each list.values as item {
+                        match item {
+                            json.ObjectValue as object => merge_into(result, object)
+                            default => {}
+                        }
+                    }
+                }
+                default => {}
+            }
+        }
+        each entries as value, key : result.set(key, value)
+        return json.new_object(result)
+    }
+}
+
+fn merge_into(result: Map[json.Value], object: json.ObjectValue) {
+    each object.values as value, key {
+        if !result.has(key) : result.set(key, value)
+    }
+}

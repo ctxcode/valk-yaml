@@ -1,0 +1,189 @@
+use valk.json
+
+// Flow style: `[a, b]` and `{a: 1, b: 2}`, over as many lines as they like.
+
+extend Parser {
+
+    // Spaces, line breaks and comments between the parts of a flow collection
+    fn skip_flow_space() !Error {
+        let text = this.text
+        while true {
+            let ch = this.peek()
+            if ch == ' ' || ch == '\t' {
+                this.at++
+            } else if ch == '\n' || ch == '\r' {
+                this.skip_break()
+                if this.is_marker(this.at) : this.fail("The document ended inside a flow collection")
+            } else if ch == '#' && (this.at == 0 || is_blank(text[this.at - 1])) {
+                this.skip_to_break()
+            } else {
+                return
+            }
+        }
+    }
+
+    // A node inside a flow collection, or a flow collection in a block. A scalar leaves its text
+    // in `scalar_text`, for when it turns out to be a key.
+    fn flow_node() json.Value !Error {
+        this.enter() !>
+        let before = this.nodes
+        let props = this.read_props() !>
+        if props.anchor.length > 0 || props.tag.length > 0 : this.skip_flow_space() !>
+        let ch = this.peek()
+        let value: json.Value = null
+        let text: ?String = null
+        this.scalar_plain = false
+        if ch == '[' {
+            value = this.flow_sequence() !>
+        } else if ch == '{' {
+            value = this.flow_mapping() !>
+        } else if ch == '*' {
+            value = this.read_alias() !>
+        } else if ch == '"' || ch == '\'' {
+            let quoted = this.read_quoted(ch) !>
+            text = quoted
+            value = this.scalar_value(quoted, false, props.tag) !>
+        } else if is_flow_indicator(ch) || (ch == ':' && (is_blank(this.peek_at(1)) || is_flow_indicator(this.peek_at(1)))) {
+            value = this.scalar_value("", true, props.tag) !>
+            text = ""
+        } else {
+            if this.done() : this.fail("A flow collection was not closed")
+            this.check_plain_start(true) !>
+            let plain = this.read_flow_plain() !>
+            text = plain
+            this.scalar_plain = props.tag.length == 0
+            value = this.scalar_value(plain, true, props.tag) !>
+        }
+        this.depth--
+        let result = this.finish(props, value, before) !>
+        this.scalar_text = text
+        return result
+    }
+
+    // `:` after a key in a flow collection. Right after a quoted key or a collection it needs no
+    // space after it, as in JSON.
+    fn at_flow_colon(adjacent: bool) bool {
+        if this.peek() != ':' : return false
+        let next = this.peek_at(1)
+        return adjacent || is_blank(next) || is_flow_indicator(next)
+    }
+
+    fn flow_sequence() json.Value !Error {
+        let start = this.at
+        this.at++ // `[`
+        let items = Array[json.Value]{}
+        while true {
+            this.skip_flow_space() !>
+            let ch = this.peek()
+            if ch == ']' {
+                this.at++
+                break
+            }
+            if this.done() : this.fail_at(start, "A flow sequence was not closed")
+            if ch == ',' : this.fail("Expected a value before ','")
+            let explicit = ch == '?' && (is_blank(this.peek_at(1)) || is_flow_indicator(this.peek_at(1)))
+            if explicit {
+                this.at++
+                this.skip_flow_space() !>
+                ch = this.peek()
+            }
+            let key_at = this.at
+            let item = this.flow_node() !>
+            let key_text = this.scalar_text
+            let adjacent = ch == '"' || ch == '\'' || ch == '[' || ch == '{'
+            this.skip_flow_space() !>
+            // `[a: 1]` is a sequence holding a mapping of one key
+            if explicit || this.at_flow_colon(adjacent) {
+                if this.at_flow_colon(adjacent) : this.at++
+                let key = key_text ?? (this.key_of(item) !>)
+                if !isset(key_text) && (item.is_array || item.is_object) : this.fail_at(key_at, "A flow collection cannot be a key: complex keys are not supported")
+                this.skip_flow_space() !>
+                let value: json.Value = null
+                let next = this.peek()
+                if next == ',' || next == ']' : value = this.scalar_value("", true, "") !>
+                else : value = this.flow_node() !>
+                let pair = Map[json.Value]{}
+                pair.set(key, value)
+                this.nodes++
+                item = json.new_object(pair)
+            }
+            items.append(item)
+            this.skip_flow_space() !>
+            let after = this.peek()
+            if after == ',' {
+                this.at++
+                continue
+            }
+            if after != ']' {
+                if this.done() : this.fail_at(start, "A flow sequence was not closed")
+                this.fail("Expected ',' or ']' in a flow sequence, found '" + show_byte(after) + "'")
+            }
+        }
+        this.nodes++
+        return json.new_array(items)
+    }
+
+    fn flow_mapping() json.Value !Error {
+        let start = this.at
+        this.at++ // `{`
+        let entries = Map[json.Value]{}
+        let merges: ?Array[json.Value] = null
+        while true {
+            this.skip_flow_space() !>
+            let ch = this.peek()
+            if ch == '}' {
+                this.at++
+                break
+            }
+            if this.done() : this.fail_at(start, "A flow mapping was not closed")
+            if ch == ',' : this.fail("Expected a key before ','")
+            if ch == '?' && (is_blank(this.peek_at(1)) || is_flow_indicator(this.peek_at(1))) {
+                this.at++
+                this.skip_flow_space() !>
+                ch = this.peek()
+            }
+            let key_at = this.at
+            let key_value = this.flow_node() !>
+            let key_text = this.scalar_text
+            let plain = this.scalar_plain
+            if !isset(key_text) && (key_value.is_array || key_value.is_object) : this.fail_at(key_at, "A flow collection cannot be a key: complex keys are not supported")
+            let key = key_text ?? (this.key_of(key_value) !>)
+            let adjacent = ch == '"' || ch == '\'' || ch == '[' || ch == '{'
+            this.skip_flow_space() !>
+
+            let value: json.Value = null
+            if this.at_flow_colon(adjacent) {
+                this.at++
+                this.skip_flow_space() !>
+                let next = this.peek()
+                if next == ',' || next == '}' : value = this.scalar_value("", true, "") !>
+                else : value = this.flow_node() !>
+            } else {
+                // `{a, b}`: keys without values
+                value = this.scalar_value("", true, "") !>
+            }
+
+            if plain && key == "<<" {
+                this.check_merge(value, key_at) !>
+                let list = merges ?? Array[json.Value]{}
+                list.append(value)
+                merges = list
+            } else {
+                if entries.has(key) : this.fail_duplicate(key_at, key)
+                entries.set(key, value)
+            }
+
+            this.skip_flow_space() !>
+            let after = this.peek()
+            if after == ',' {
+                this.at++
+                continue
+            }
+            if after != '}' {
+                if this.done() : this.fail_at(start, "A flow mapping was not closed")
+                this.fail("Expected ',' or '}' in a flow mapping, found '" + show_byte(after) + "'")
+            }
+        }
+        return this.build_map(entries, merges)
+    }
+}

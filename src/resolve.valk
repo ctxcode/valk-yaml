@@ -1,0 +1,161 @@
+use valk.json
+
+// What a scalar's text means: YAML 1.2's core schema, and the tags that override it.
+
+value TAG_STR ("tag:yaml.org,2002:str")
+value TAG_INT ("tag:yaml.org,2002:int")
+value TAG_FLOAT ("tag:yaml.org,2002:float")
+value TAG_BOOL ("tag:yaml.org,2002:bool")
+value TAG_NULL ("tag:yaml.org,2002:null")
+
+// Kinds of number text
+value NUM_NONE (0)
+value NUM_INT (1)
+value NUM_OCTAL (2)
+value NUM_HEX (3)
+value NUM_FLOAT (4)
+value NUM_INF (5)
+value NUM_NEG_INF (6)
+value NUM_NAN (7)
+
+extend Parser {
+    // A scalar as a value. Only plain scalars resolve to something other than a string, unless a
+    // tag says what they are.
+    fn scalar_value(text: String, plain: bool, tag: String) json.Value !Error {
+        this.nodes++
+        this.scalar_text = text
+        if tag.length == 0 {
+            if plain : return resolve_plain(text)
+            return text
+        }
+        if tag == TAG_STR || tag == "!" : return text
+        if tag == TAG_NULL : return null
+        if tag == TAG_BOOL {
+            let value = resolve_plain(text)
+            if !value.is_bool : this.fail_type("'" + text + "' is not a bool")
+            return value
+        }
+        if tag == TAG_INT {
+            let kind = number_kind(text)
+            if kind < NUM_INT || kind > NUM_HEX : this.fail_type("'" + text + "' is not an integer")
+            return number_value(text, kind)
+        }
+        if tag == TAG_FLOAT {
+            let kind = number_kind(text)
+            if kind == NUM_NONE : this.fail_type("'" + text + "' is not a number")
+            return number_value(text, kind).float
+        }
+        if is_seq_tag(tag) || is_map_tag(tag) : this.fail_type("A scalar cannot have the tag '" + tag + "'")
+        // A tag this package does not know keeps the text as it is
+        return text
+    }
+}
+
+fn resolve_plain(text: String) json.Value {
+    let n = text.length
+    if n == 0 : return null
+    let c = text[0]
+    if n <= 5 {
+        if c == '~' && n == 1 : return null
+        if c == 'n' || c == 'N' {
+            if text == "null" || text == "Null" || text == "NULL" : return null
+        } else if c == 't' || c == 'T' {
+            if text == "true" || text == "True" || text == "TRUE" : return true
+        } else if c == 'f' || c == 'F' {
+            if text == "false" || text == "False" || text == "FALSE" : return false
+        }
+    }
+    if (c >= '0' && c <= '9') || c == '-' || c == '+' || c == '.' {
+        let kind = number_kind(text)
+        if kind != NUM_NONE : return number_value(text, kind)
+    }
+    return text
+}
+
+// Which number the text is in the core schema, or NUM_NONE
+fn number_kind(t: String) u8 {
+    let n = t.length
+    if n == 0 : return NUM_NONE
+    if n > 2 && t[0] == '0' {
+        if t[1] == 'x' {
+            let i: uint = 2
+            while i < n {
+                if hex_value(t[i]) > 15 : return NUM_NONE
+                i++
+            }
+            return NUM_HEX
+        }
+        if t[1] == 'o' {
+            let i: uint = 2
+            while i < n {
+                let ch = t[i]
+                if ch < '0' || ch > '7' : return NUM_NONE
+                i++
+            }
+            return NUM_OCTAL
+        }
+    }
+    let i: uint = 0
+    let signed = t[0] == '+' || t[0] == '-'
+    if signed : i = 1
+    if t[i] == '.' && n - i == 4 {
+        let word = t.range(i + 1, 3)
+        if word == "inf" || word == "Inf" || word == "INF" : return t[0] == '-' ? NUM_NEG_INF : NUM_INF
+        if !signed && (word == "nan" || word == "NaN" || word == "NAN") : return NUM_NAN
+    }
+    let int_digits: uint = 0
+    while is_digit(t[i]) {
+        i++
+        int_digits++
+    }
+    if i == n : return int_digits > 0 ? NUM_INT : NUM_NONE
+    let fraction_digits: uint = 0
+    if t[i] == '.' {
+        i++
+        while is_digit(t[i]) {
+            i++
+            fraction_digits++
+        }
+    }
+    if int_digits == 0 && fraction_digits == 0 : return NUM_NONE
+    if t[i] == 'e' || t[i] == 'E' {
+        i++
+        if t[i] == '+' || t[i] == '-' : i++
+        if !is_digit(t[i]) : return NUM_NONE
+        while is_digit(t[i]) : i++
+    }
+    return i == n ? NUM_FLOAT : NUM_NONE
+}
+
+fn number_value(text: String, kind: u8) json.Value {
+    if kind == NUM_INT {
+        let number = text.to_int() ! return text.to_float() !? 0.0
+        return number
+    }
+    if kind == NUM_HEX || kind == NUM_OCTAL {
+        let digits = text.range(2, text.length - 2)
+        let number: uint = 0
+        if kind == NUM_HEX : number = digits.hex_to_uint() ! return text
+        else : number = digits.octal_to_uint() ! return text
+        if number > int.$max.to(uint) : return number.to(float)
+        return number.to(int)
+    }
+    if kind == NUM_INF : return "inf".to_float() !? 0.0
+    if kind == NUM_NEG_INF : return "-inf".to_float() !? 0.0
+    if kind == NUM_NAN : return "nan".to_float() !? 0.0
+    return text.to_float() !? 0.0
+}
+
+fn is_digit(ch: u8) bool {
+    return ch >= '0' && ch <= '9'
+}
+
+fn is_scalar_tag(tag: String) bool {
+    return tag == TAG_STR || tag == TAG_INT || tag == TAG_FLOAT || tag == TAG_BOOL || tag == TAG_NULL
+}
+fn is_seq_tag(tag: String) bool {
+    return tag == "tag:yaml.org,2002:seq" || tag == "tag:yaml.org,2002:omap" || tag == "tag:yaml.org,2002:pairs"
+}
+fn is_map_tag(tag: String) bool {
+    return tag == "tag:yaml.org,2002:map" || tag == "tag:yaml.org,2002:set"
+}

@@ -1,0 +1,6 @@
+debug
+vendor
+tests/vendor
+example/vendor
+tests/tmp
+__pycache__

@@ -1,0 +1,58 @@
+use yaml
+
+class Server {
+    host: String ("127.0.0.1")
+    port: uint (8080)
+}
+
+class Database {
+    url: String
+    pool: uint (4)
+}
+
+class Settings {
+    name: String
+    debug: bool (false)
+    tags: Array[String] (.{})
+    server: Server
+    database: Database
+}
+
+fn main() {
+    let text = "
+defaults: &defaults
+  pool: 8
+
+name: the service
+debug: true
+tags: [web, api]
+
+server:
+  host: 0.0.0.0
+  port: 9000
+
+database:
+  <<: *defaults
+  url: sqlite://app.db
+"
+
+    // Straight into a class of your own
+    let settings = yaml.decode_to[Settings](text) ! panic("%{E.message} at line %{E.line}")
+    println(settings.name + " listens on " + settings.server.host + ":" + settings.server.port)
+    println("tags: " + settings.tags.join(", "))
+    println("database pool: " + settings.database.pool)
+
+    // Or as a document, when the shape is not fixed
+    let document = yaml.decode(text) ! panic("%{E.message}")
+    println("debug: " + document["debug"].bool)
+
+    // And back out again
+    settings.server.port = 9100
+    println("\n--- written back ---")
+    print(yaml.encode_of(settings))
+
+    // A text that is not YAML says where it gave up
+    yaml.decode("name: [unclosed\n") ! {
+        println("\nrefused: " + E.message + " (line " + E.line + ", column " + E.column + ")")
+    }
+}

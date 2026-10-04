@@ -1,0 +1,175 @@
+use valk.json
+use valk.time
+
+@ignore_access
+
+// `value` as `T`; a value that does not fit throws `.type` naming the key at `path`
+fn value_to[T](value: json.Value, path: String) T !Error {
+    #if T.$is_nullable
+    if value.is_null : return null
+    #end
+    #if T.$nonnull.$is_type_of(time.DateTime)
+    let text = value.is_string ? value.string : ""
+    return parse_datetime(text) ?! throw .type { message: "'" + path + "' should be a date, or a date and time" }
+    #elif T.$nonnull.$is_type_of(Array[time.DateTime])
+    if !value.is_array : throw .type { message: "'" + path + "' should be an array of dates" }
+    let dates = Array[time.DateTime]{}
+    each value.array.values as item, index {
+        dates.append(value_to[time.DateTime](item, path + "[" + index + "]") !>)
+    }
+    return dates
+    #elif T.$nonnull.$is_type_of(json.Value) || T.$nonnull.$is_type_of(String) || T.$is_integer || T.$is_float || T.$is_bool || T.$has_method(from_json_value) || T.$has_method(from_json_value_auto) || !T.$is_structural
+    return value.to_type[T]() ! throw .type { message: "'" + path + "' should be " + expected_kind[T]() }
+    #else
+    if !value.is_object : throw .type { message: "'" + path + "' should be a mapping" }
+    let source = value.object
+    let result = T {
+        #loop properties T as prop
+        prop: <{
+            let key = path.is_empty() ? prop.name : path + "." + prop.name
+            #if prop.$has_explicit_default_value || prop.$type.$is_nullable
+            let field = source.get(prop.name) ! return prop.$default_value
+            if field.is_null : return prop.$default_value
+            return value_to[prop](field, key) !>
+            #else
+            let field = source.get(prop.name) ! throw .type { message: "'" + key + "' is missing" }
+            return value_to[prop](field, key) !>
+            #end
+        }
+        #end
+    }
+    return result
+    #end
+}
+
+// `data` as a JSON value, as `json.from` makes it, with dates as ISO 8601 text. `stack` holds the
+// objects being written, so one that holds itself becomes "(recursion)" as there.
+fn value_from(data: $T, stack: Array[uint]) json.Value {
+    #if T.$nonnull.$is_type_of(time.DateTime)
+    @unsafe
+    if !isset(data) : return null
+    return json.new_string(data.to_iso8601())
+    #elif T.$nonnull.$is_type_of(Array[time.DateTime])
+    @unsafe
+    if !isset(data) : return null
+    let values = Array[json.Value]{}
+    each data as date : values.append(value_from(date, stack))
+    return json.new_array(values)
+    #elif T.$nonnull.$is_type_of(json.Value) || T.$nonnull.$is_type_of(String) || T.$is_integer || T.$is_float || T.$is_bool || T.$has_method(to_json_value) || T.$has_method(to_json_value_with_stack) || !T.$is_structural
+    return json.from(data)
+    #else
+    @unsafe
+    if !isset(data) : return null
+    #if T.$is_pointer
+    let node = data.@cast(ptr).@cast(uint)
+    if stack.contains(node) : return json.new_string("(recursion)")
+    stack.append(node)
+    #end
+    let values = Map[json.Value]{}
+    #loop object data as prop
+    values.set(prop.name, value_from(prop, stack))
+    #end
+    #if T.$is_pointer
+    stack.pop_last() _
+    #end
+    return json.new_object(values)
+    #end
+}
+
+// A YAML timestamp: a date, or a date and time. One with an offset is converted to UTC, one
+// without is taken as UTC, and a date alone is its midnight. Null for anything else.
+fn parse_datetime(text: String) ?time.DateTime {
+    let n = text.length
+    if n < 10 || text[4] != '-' || text[7] != '-' : return null
+    let year = read_digits(text, 0, 4) ?! return null
+    let month = read_digits(text, 5, 2) ?! return null
+    let day = read_digits(text, 8, 2) ?! return null
+    if n == 10 : return time.DateTime.new(year.to(int), month, day) !? null
+    let i: uint = 10
+    if text[i] == 'T' || text[i] == 't' {
+        i++
+    } else {
+        if text[i] != ' ' && text[i] != '\t' : return null
+        while text[i] == ' ' || text[i] == '\t' : i++
+    }
+    // The hour may have one digit
+    let hour_digits: uint = is_digit(text[i + 1]) ? 2 : 1
+    let hour = read_digits(text, i, hour_digits) ?! return null
+    i += hour_digits
+    if text[i] != ':' : return null
+    let minute = read_digits(text, i + 1, 2) ?! return null
+    i += 3
+    let second: uint = 0
+    let microsecond: uint = 0
+    if text[i] == ':' {
+        second = read_digits(text, i + 1, 2) ?! return null
+        i += 3
+        if text[i] == '.' {
+            i++
+            let digits: uint = 0
+            while is_digit(text[i]) {
+                // Microseconds keep six digits; more are cut off
+                if digits < 6 {
+                    microsecond = microsecond * 10 + (text[i] - '0').to(uint)
+                    digits++
+                }
+                i++
+            }
+            while digits < 6 {
+                microsecond = microsecond * 10
+                digits++
+            }
+        }
+    }
+    while text[i] == ' ' || text[i] == '\t' : i++
+    let offset: int = 0
+    if text[i] == 'Z' || text[i] == 'z' {
+        i++
+    } else if text[i] == '+' || text[i] == '-' {
+        let sign = text[i]
+        i++
+        let digits: uint = is_digit(text[i + 1]) ? 2 : 1
+        let hours = read_digits(text, i, digits) ?! return null
+        i += digits
+        let minutes: uint = 0
+        if text[i] == ':' {
+            minutes = read_digits(text, i + 1, 2) ?! return null
+            i += 3
+        }
+        offset = (hours * 60 + minutes).to(int)
+        if sign == '-' : offset = 0 - offset
+    }
+    if i != n : return null
+    let local = time.DateTime.new(year.to(int), month, day, hour, minute, second, microsecond) !? null
+    if !isset(local) : return null
+    if offset == 0 : return local
+    return local.add_minutes(0 - offset) !? null
+}
+
+// The number written with exactly `count` digits at `at`
+fn read_digits(text: String, at: uint, count: uint) ?uint {
+    if at + count > text.length : return null
+    let value: uint = 0
+    let i: uint = 0
+    while i < count {
+        let ch = text[at + i]
+        if ch < '0' || ch > '9' : return null
+        value = value * 10 + (ch - '0').to(uint)
+        i++
+    }
+    return value
+}
+
+fn expected_kind[T]() String {
+    #if T.$nonnull.$is_type_of(String)
+    return "a string"
+    #elif T.$is_integer
+    return "an integer that fits the field"
+    #elif T.$is_float
+    return "a number"
+    #elif T.$is_bool
+    return "true or false"
+    #else
+    return "a value of the field's type"
+    #end
+}

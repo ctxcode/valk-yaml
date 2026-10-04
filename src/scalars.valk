@@ -1,0 +1,419 @@
+use valk.json
+
+// Plain, quoted and block scalars, as text.
+
+extend Parser {
+
+    // Scans the plain scalar on this line up to `: `, ` #` or the end of the line (and in a flow
+    // collection also a flow indicator). Leaves the cursor at the end of its text, without the
+    // spaces after it, and returns that position.
+    fn scan_plain_line(flow: bool) uint {
+        let text = this.text
+        let len = text.length
+        let at = this.at
+        let end = at
+        while at < len {
+            let ch = text[at]
+            if ch == ' ' || ch == '\t' {
+                let j = at + 1
+                while text[j] == ' ' || text[j] == '\t' : j++
+                if text[j] == '#' : break
+                at = j
+                continue
+            }
+            if ch == '\n' || ch == '\r' : break
+            if ch == ':' {
+                let after = text[at + 1]
+                if is_blank(after) || (flow && is_flow_indicator(after)) : break
+            } else if flow && is_flow_indicator(ch) {
+                break
+            }
+            at++
+            end = at
+        }
+        this.at = end
+        return end
+    }
+
+    // Characters that mean something else at the start of a value
+    fn check_plain_start(flow: bool) !Error {
+        let ch = this.peek()
+        let next = this.peek_at(1)
+        if ch == ':' && (is_blank(next) || (flow && is_flow_indicator(next))) : this.fail("A key cannot be empty")
+        if ch == '@' || ch == '`' || ch == '%' || ch == ',' || ch == ']' || ch == '}' || ch == '#' {
+            this.fail("A value cannot start with '" + show_byte(ch) + "'; quote it")
+        }
+        if ch == '-' && (is_blank(next) || (flow && is_flow_indicator(next))) : this.fail("Unexpected '-'")
+        if ch == '?' && (is_blank(next) || (flow && is_flow_indicator(next))) : this.fail("Unexpected '?'")
+    }
+
+    // A plain scalar in block style, which goes on over the lines below that are indented further
+    // than `parent`. A line break between them reads as a space, and empty lines as line breaks.
+    fn read_block_plain(parent: int) String !Error {
+        let text = this.text
+        let len = text.length
+        let start = this.at
+        let end = this.scan_plain_line(false)
+        let out: ?ByteBuffer = null
+        while true {
+            let at = end
+            while text[at] == ' ' || text[at] == '\t' : at++
+            if !is_break(text[at]) : break
+            // Count the line breaks up to the next line with text on it
+            let breaks: uint = 0
+            let indent: uint = 0
+            while is_break(text[at]) {
+                if text[at] == '\r' && text[at + 1] == '\n' : at++
+                at++
+                breaks++
+                let line_start = at
+                while text[at] == ' ' : at++
+                indent = at - line_start
+                while text[at] == ' ' || text[at] == '\t' : at++
+            }
+            if at >= len || text[at] == '#' : break
+            if indent.to(int) <= parent : break
+            if indent == 0 && this.is_marker(at) : break
+
+            this.at = at
+            let line_end = this.scan_plain_line(false)
+            let after = line_end
+            while text[after] == ' ' || text[after] == '\t' : after++
+            if text[after] == ':' && is_blank(text[after + 1]) {
+                this.fail_at(after, "A plain value that goes on over several lines cannot hold ': '; quote it")
+            }
+            if line_end == at : break
+
+            let buffer = out ?? ByteBuffer.new(64)
+            if !isset(out) : buffer.write(text.view(start, end - start))
+            out = buffer
+            if breaks == 1 : buffer.write_byte(' ')
+            else : buffer.fill('\n', breaks - 1)
+            buffer.write(text.view(at, line_end - at))
+            end = line_end
+        }
+        this.at = end
+        if isset(out) : return out.to_string()
+        return text.range(start, end - start)
+    }
+
+    // A plain scalar inside a flow collection, which may also go on over several lines
+    fn read_flow_plain() String !Error {
+        let text = this.text
+        let len = text.length
+        let start = this.at
+        let end = this.scan_plain_line(true)
+        let out: ?ByteBuffer = null
+        while true {
+            let at = end
+            while text[at] == ' ' || text[at] == '\t' : at++
+            if !is_break(text[at]) : break
+            let breaks: uint = 0
+            while is_break(text[at]) {
+                if text[at] == '\r' && text[at + 1] == '\n' : at++
+                at++
+                breaks++
+                while text[at] == ' ' || text[at] == '\t' : at++
+            }
+            if at >= len : break
+            let ch = text[at]
+            if ch == '#' || is_flow_indicator(ch) : break
+            if ch == ':' && (is_blank(text[at + 1]) || is_flow_indicator(text[at + 1])) : break
+            this.at = at
+            let line_end = this.scan_plain_line(true)
+            if line_end == at : break
+
+            let buffer = out ?? ByteBuffer.new(64)
+            if !isset(out) : buffer.write(text.view(start, end - start))
+            out = buffer
+            if breaks == 1 : buffer.write_byte(' ')
+            else : buffer.fill('\n', breaks - 1)
+            buffer.write(text.view(at, line_end - at))
+            end = line_end
+        }
+        this.at = end
+        if isset(out) : return out.to_string()
+        return text.range(start, end - start)
+    }
+
+    // `'...'` or `"..."`, over as many lines as it likes
+    fn read_quoted(quote: u8) String !Error {
+        let text = this.text
+        let len = text.length
+        let start = this.at
+        let double = quote == '"'
+        let at = start + 1
+        let run = at
+        // Fast path: no escapes and no line breaks
+        while at < len {
+            let ch = text[at]
+            if ch == quote {
+                if !double && text[at + 1] == '\'' : break
+                this.at = at + 1
+                return text.range(run, at - run)
+            }
+            if ch == '\\' && double : break
+            if ch == '\n' || ch == '\r' : break
+            at++
+        }
+
+        let out = this.buf
+        out.clear()
+        // Escaped spaces are kept where a line break drops the spaces before it
+        let keep: uint = 0
+        while true {
+            if at >= len : this.fail_at(start, "A quoted value was not closed")
+            let ch = text[at]
+            if ch == quote {
+                out.write(text.view(run, at - run))
+                if !double && text[at + 1] == '\'' {
+                    out.write_byte('\'')
+                    at += 2
+                    run = at
+                    continue
+                }
+                this.at = at + 1
+                return out.to_string()
+            }
+            if ch == '\\' && double {
+                out.write(text.view(run, at - run))
+                this.at = at + 1
+                if is_break(text[at + 1]) {
+                    // An escaped line break joins the lines without a space
+                    this.skip_break()
+                    this.fold_breaks(out, start, false) !>
+                } else {
+                    this.read_escape(out) !>
+                }
+                keep = out.length
+                at = this.at
+                run = at
+                continue
+            }
+            if ch == '\n' || ch == '\r' {
+                out.write(text.view(run, at - run))
+                let length = out.length
+                while length > keep && (out[length - 1] == ' ' || out[length - 1] == '\t') : length--
+                out.truncate(length)
+                this.at = at
+                this.skip_break()
+                this.fold_breaks(out, start, true) !>
+                at = this.at
+                run = at
+                continue
+            }
+            at++
+        }
+    }
+
+    // After a line break inside quotes: empty lines become line breaks, and none becomes a space
+    // when `space` is set. Skips the indent of the line the text goes on at.
+    fn fold_breaks(out: ByteBuffer, start: uint, space: bool) !Error {
+        let breaks: uint = 0
+        while true {
+            let line_start = this.at
+            this.skip_spaces()
+            if is_break(this.peek()) {
+                this.skip_break()
+                breaks++
+                continue
+            }
+            if this.done() : this.fail_at(start, "A quoted value was not closed")
+            if line_start == this.at && this.is_marker(line_start) : this.fail_at(start, "A quoted value was not closed before the document ended")
+            break
+        }
+        if breaks > 0 : out.fill('\n', breaks)
+        else if space : out.write_byte(' ')
+    }
+
+    // After a `\`
+    fn read_escape(out: ByteBuffer) !Error {
+        let ch = this.peek()
+        this.at++
+        if ch == 'n' : out.write_byte('\n')
+        else if ch == 't' || ch == '\t' : out.write_byte('\t')
+        else if ch == '\\' : out.write_byte('\\')
+        else if ch == '"' : out.write_byte('"')
+        else if ch == '/' : out.write_byte('/')
+        else if ch == ' ' : out.write_byte(' ')
+        else if ch == '0' : out.write_byte(0)
+        else if ch == 'a' : out.write_byte(7)
+        else if ch == 'b' : out.write_byte(8)
+        else if ch == 'v' : out.write_byte(11)
+        else if ch == 'f' : out.write_byte(12)
+        else if ch == 'r' : out.write_byte('\r')
+        else if ch == 'e' : out.write_byte(27)
+        else if ch == 'N' : write_utf8(out, 0x85)
+        else if ch == '_' : write_utf8(out, 0xa0)
+        else if ch == 'L' : write_utf8(out, 0x2028)
+        else if ch == 'P' : write_utf8(out, 0x2029)
+        else if ch == 'x' : write_utf8(out, this.read_hex(2) !>)
+        else if ch == 'u' {
+            let code = this.read_hex(4) !>
+            // A surrogate pair written as two escapes
+            if code >= 0xd800 && code < 0xdc00 && this.peek() == '\\' && this.peek_at(1) == 'u' {
+                let save = this.at
+                this.at += 2
+                let low = this.read_hex(4) !>
+                if low >= 0xdc00 && low < 0xe000 {
+                    code = 0x10000 + ((code - 0xd800) << 10) + (low - 0xdc00)
+                } else {
+                    this.at = save
+                }
+            }
+            if code >= 0xd800 && code < 0xe000 : code = 0xfffd
+            write_utf8(out, code)
+        }
+        else if ch == 'U' {
+            let code = this.read_hex(8) !>
+            if code > 0x10ffff : this.fail("A \\U escape above 10FFFF is not a character")
+            write_utf8(out, code)
+        }
+        else {
+            this.at--
+            this.fail("'\\" + show_byte(ch) + "' is not an escape YAML knows")
+        }
+    }
+
+    fn read_hex(digits: uint) uint !Error {
+        let value: uint = 0
+        let i: uint = 0
+        while i < digits {
+            let ch = this.peek()
+            let digit = hex_value(ch)
+            if digit > 15 : this.fail("This escape needs " + digits + " hex digits")
+            value = (value << 4) | digit
+            this.at++
+            i++
+        }
+        return value
+    }
+
+    // `|` or `>`, with its chomping (`-`, `+`) and indent (`1`-`9`) indicators, then the lines
+    // below that are indented further than `parent`
+    fn read_block_scalar(parent: int, tag: String) json.Value !Error {
+        let text = this.text
+        let len = text.length
+        let folded = this.peek() == '>'
+        this.at++
+        // -1 strips the last line break, 0 keeps one, 1 keeps them all
+        let chomp: int = 0
+        let increment: int = 0
+        let i = 0
+        while i++ < 2 {
+            let ch = this.peek()
+            if (ch == '-' || ch == '+') && chomp == 0 {
+                chomp = ch == '-' ? -1 : 1
+                this.at++
+            } else if ch >= '1' && ch <= '9' && increment == 0 {
+                increment = (ch - '0').to(int)
+                this.at++
+            }
+        }
+        let header_start = this.at
+        this.skip_spaces()
+        if this.peek() == '#' {
+            if header_start == this.at : this.fail("A comment needs a space before its '#'")
+            this.skip_to_break()
+        }
+        if !this.at_break() : this.fail("Expected the end of the line after a block scalar's indicators")
+        let header_end = this.at
+
+        let base = parent < 0 ? 0 : parent
+        let indent: int = increment > 0 ? base + increment : -1
+        let out = this.buf
+        out.clear()
+        let at = header_end
+        let content_end = header_end
+        let has_content = false
+        let ended_with_break = false
+        let empty: uint = 0
+        let leading_spaces: int = 0
+        let previous_plain = false
+        // Skip the header's line break
+        if text[at] == '\r' && text[at + 1] == '\n' : at++
+        if at < len : at++
+
+        while at < len {
+            let line_start = at
+            while text[at] == ' ' : at++
+            let spaces = (at - line_start).to(int)
+            let ch = text[at]
+            if is_break(ch) || at >= len {
+                if at >= len : break
+                if indent < 0 || spaces <= indent {
+                    // An empty line
+                    if indent < 0 && spaces > leading_spaces : leading_spaces = spaces
+                    if ch == '\r' && text[at + 1] == '\n' : at++
+                    at++
+                    empty++
+                    continue
+                }
+            } else if indent < 0 {
+                if spaces <= parent : break
+                indent = spaces
+                if leading_spaces > indent : this.fail_at(at, "An empty line at the start of a block scalar has more spaces than its first line")
+            }
+            if spaces < indent : break
+            if indent == 0 && this.is_marker(line_start) : break
+
+            let text_start = line_start + indent.to(uint)
+            let text_end = text_start
+            while text_end < len && !is_break(text[text_end]) : text_end++
+            let first = text[text_start]
+            let plain_line = first != ' ' && first != '\t'
+            if !has_content {
+                out.fill('\n', empty)
+            } else if folded && previous_plain && plain_line {
+                if empty == 0 : out.write_byte(' ')
+                else : out.fill('\n', empty)
+            } else {
+                out.fill('\n', empty + 1)
+            }
+            has_content = true
+            empty = 0
+            out.write(text.view(text_start, text_end - text_start))
+            previous_plain = plain_line
+            content_end = text_end
+            ended_with_break = text_end < len
+            at = text_end
+            if text[at] == '\r' && text[at + 1] == '\n' : at++
+            if at < len : at++
+        }
+
+        if has_content {
+            if chomp >= 0 && ended_with_break : out.write_byte('\n')
+            if chomp > 0 : out.fill('\n', empty)
+            this.at = content_end
+        } else {
+            if chomp > 0 : out.fill('\n', empty)
+            this.at = header_end
+        }
+        return this.scalar_value(out.to_string(), false, tag) !>
+    }
+}
+
+fn hex_value(ch: u8) uint {
+    if ch >= '0' && ch <= '9' : return (ch - '0').to(uint)
+    if ch >= 'a' && ch <= 'f' : return (ch - 'a' + 10).to(uint)
+    if ch >= 'A' && ch <= 'F' : return (ch - 'A' + 10).to(uint)
+    return 99
+}
+
+fn write_utf8(out: ByteBuffer, code: uint) {
+    if code < 0x80 {
+        out.write_byte(code.to(u8))
+    } else if code < 0x800 {
+        out.write_byte((0xc0 | (code >> 6)).to(u8))
+        out.write_byte((0x80 | (code & 0x3f)).to(u8))
+    } else if code < 0x10000 {
+        out.write_byte((0xe0 | (code >> 12)).to(u8))
+        out.write_byte((0x80 | ((code >> 6) & 0x3f)).to(u8))
+        out.write_byte((0x80 | (code & 0x3f)).to(u8))
+    } else {
+        out.write_byte((0xf0 | (code >> 18)).to(u8))
+        out.write_byte((0x80 | ((code >> 12) & 0x3f)).to(u8))
+        out.write_byte((0x80 | ((code >> 6) & 0x3f)).to(u8))
+        out.write_byte((0x80 | (code & 0x3f)).to(u8))
+    }
+}

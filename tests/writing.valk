@@ -1,0 +1,161 @@
+use yaml
+use valk.json
+
+fn read(text: String) json.Value {
+    return yaml.decode(text) ! {
+        println(E.message + " at line " + E.line + " of:\n" + text)
+        return null
+    }
+}
+
+test "Writing block style" {
+    let document = read("
+name: valk
+nested:
+  list: [1, 2.5, true, null]
+  map: {a: b}
+  empty_list: []
+  empty_map: {}
+items:
+  - a: 1
+    b: 2
+  - [x, y]
+  - plain
+")
+    let text = yaml.encode(document)
+    assert(text == "name: valk
+nested:
+  list:
+    - 1
+    - 2.5
+    - true
+    - null
+  map:
+    a: b
+  empty_list: []
+  empty_map: {}
+items:
+  - a: 1
+    b: 2
+  - - x
+    - y
+  - plain
+")
+}
+
+test "Strings are quoted only when needed" {
+    let words = Array[String]{
+        "plain", "two words", "", " lead", "trail ", "true", "False", "null", "~", "yes", "No", "on",
+        "12", "1.5", "1e3", ".inf", ".nan", "0x1f", "0o17", "0755", "1_000", "12:30", "2001-12-14",
+        "1.2.3", "127.0.0.1", "- x", "? x", ": x", "a: b", "a #b", "a:", "#x", "&a", "*a", "!a",
+        "|", ">", "'", "\"", "%", "@", "`", "[x]", "{x}", "a,b", "---", "...", "<<", "é", "😀",
+        "tab\there", "line\nbreak", "bell\x07", "nel\xc2\x85", "a:b", "http://x.y/z", "a#b"
+    }
+    let quoted = Array[String]{
+        "", " lead", "trail ", "true", "False", "null", "~", "yes", "No", "on", "12", "1.5", "1e3",
+        ".inf", ".nan", "0x1f", "0o17", "0755", "1_000", "12:30", "2001-12-14", "- x", "? x", ": x",
+        "a: b", "a #b", "a:", "#x", "&a", "*a", "!a", "|", ">", "'", "\"", "%", "@", "`", "[x]",
+        "{x}", "---", "...", "<<", "tab\there", "bell\x07", "nel\xc2\x85"
+    }
+    let all_match = true
+    each words as word {
+        let list = json.new_array()
+        list.append(word)
+        let text = yaml.encode(list)
+        let is_quoted = text.starts_with("- \"")
+        if is_quoted != quoted.contains(word) {
+            println("\"" + word.escape() + "\" was written as " + text.escape())
+            all_match = false
+        }
+        let back = read(text)
+        if back[0].string != word || !back[0].is_string {
+            println("\"" + word.escape() + "\" read back as " + json.encode(back))
+            all_match = false
+        }
+    }
+    assert(all_match)
+}
+
+test "Keys are quoted the same way" {
+    let document = json.new_object()
+    document.set("1", json.new_int(1))
+    document.set("true", json.new_bool(true))
+    document.set("a key", json.new_string("v"))
+    document.set("a: b", json.new_string("v"))
+    document.set("<<", json.new_string("not a merge"))
+    let text = yaml.encode(document)
+    assert(text == "\"1\": 1\n\"true\": true\na key: v\n\"a: b\": v\n\"<<\": not a merge\n")
+    let back = read(text)
+    assert(back["<<"].string == "not a merge")
+    assert(back["1"].int == 1)
+}
+
+test "Strings over several lines are literal blocks" {
+    let document = json.new_object()
+    document.set("clip", json.new_string("one\ntwo\n"))
+    document.set("strip", json.new_string("one\ntwo"))
+    document.set("keep", json.new_string("one\n\n"))
+    document.set("indented", json.new_string("  starts with spaces\nnext\n"))
+    document.set("empty_lines", json.new_string("a\n\n\nb\n"))
+    document.set("spaces_line", json.new_string("a\n   \nb"))
+    document.set("only_breaks", json.new_string("\n\n"))
+    let list = json.new_array()
+    list.append(json.new_string("in\na list\n"))
+    document.set("list", list)
+
+    let text = yaml.encode(document)
+    assert(text.contains("clip: |\n  one\n  two\n"))
+    assert(text.contains("strip: |-\n  one\n  two\n"))
+    assert(text.contains("keep: |+\n  one\n\n"))
+    assert(text.contains("indented: |2\n    starts with spaces\n  next\n"))
+    assert(text.contains("only_breaks: \"\\n\\n\"\n"))
+    assert(text.contains("list:\n  - |\n    in\n    a list\n"))
+
+    let back = read(text)
+    each document.values as value, key {
+        if back[key].string != value.string {
+            println(key + " read back as \"" + back[key].string.escape() + "\"")
+            assert(false)
+        }
+    }
+    assert(back["list"][0].string == "in\na list\n")
+}
+
+test "Numbers" {
+    let list = json.new_array()
+    list.append(json.new_int(-5))
+    list.append(json.new_float(1.0))
+    list.append(json.new_float(-0.5))
+    list.append(json.new_float(1e20))
+    list.append(json.new_float(1.5e-7))
+    list.append(json.new_float("inf".to_float() !? 0))
+    list.append(json.new_float("-inf".to_float() !? 0))
+    list.append(json.new_float("nan".to_float() !? 0))
+    let text = yaml.encode(list)
+    assert(text == "- -5\n- 1.0\n- -0.5\n- 1.0e+20\n- 1.5e-7\n- .inf\n- -.inf\n- .nan\n")
+    let back = read(text)
+    assert(back[1].is_float && back[1].float == 1.0)
+    assert(back[3].float == 1e20)
+    assert(back[4].float == 1.5e-7)
+    assert(back[7].float.is_nan())
+}
+
+test "Top level values and documents" {
+    assert(yaml.encode(json.new_string("text")) == "text\n")
+    assert(yaml.encode(json.new_int(3)) == "3\n")
+    assert(yaml.encode(null) == "null\n")
+    assert(yaml.encode(json.new_array()) == "[]\n")
+    assert(yaml.encode(json.new_object()) == "{}\n")
+    assert(yaml.encode(json.new_string("two\nlines\n")) == "|\n  two\n  lines\n")
+
+    let documents = Array[json.Value]{ json.new_int(1), json.new_string("two") }
+    let text = yaml.encode_all(documents)
+    assert(text == "1\n---\ntwo\n")
+    let back = yaml.decode_all(text) ! { assert(false) return }
+    assert(back.length == 2 && back[1].string == "two")
+}
+
+test "Aliases are written out in full" {
+    let document = read("a: &a {x: 1}\nb: *a\n")
+    assert(yaml.encode(document) == "a:\n  x: 1\nb:\n  x: 1\n")
+}

@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - '**/*.md'
+  pull_request:
+    branches: [ main ]
+
+env:
+  VALK_VERSION: "0.7.8"
+
+jobs:
+  test:
+    name: "Test on linux-x64"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install vman
+        run: |
+          curl -fL -o vman.tar.gz https://files.valk-cdn.dev/releases/vman/vman-linux-x64.tar.gz
+          mkdir -p "$HOME/vman"
+          tar -xf vman.tar.gz -C "$HOME/vman"
+          echo "$HOME/vman/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.vman/bin" >> "$GITHUB_PATH"
+
+      - name: Install valk
+        run: vman use "$VALK_VERSION"
+
+      - name: Run the tests
+        run: make test
+
+      - name: Check that the api docs match the source
+        run: |
+          make docs
+          git diff --exit-code docs || { echo "The api docs are out of date, run 'make docs'"; exit 1; }

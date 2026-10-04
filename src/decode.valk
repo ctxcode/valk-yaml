@@ -1,0 +1,122 @@
+use valk.json
+
+/// Reads one YAML document and returns it as a `json.Value`, so everything that works with JSON
+/// works with it.
+///
+/// Scalars follow YAML 1.2's core schema: `null`, `~` and nothing are null, `true`/`false` are
+/// bools, `12`, `0x1f` and `0o17` are integers, `1.5`, `1e3`, `.inf` and `.nan` are floats, and
+/// anything else, or anything quoted, is a string. Mapping keys are strings, as written. An
+/// empty text is null; a text with more than one document throws, see `decode_all`.
+///
+/// ```valk
+/// let config = yaml.decode(fs.read("config.yaml") !!) ! panic("%{E.message}")
+/// println(config["server"]["port"].int)
+/// ```
++ fn decode(text: String) json.Value !Error {
+    let documents = parse_stream(text, true) !>
+    if documents.length == 0 : return null
+    return documents.get(0) !? null
+}
+
+/// Reads every document in a YAML text, the ones that `---` starts.
+///
+/// ```valk
+/// each yaml.decode_all(text) ! panic("%{E.message}") as document {
+///     println(document["kind"].string)
+/// }
+/// ```
++ fn decode_all(text: String) Array[json.Value] !Error {
+    return parse_stream(text, false) !>
+}
+
+/// Reads one YAML document into a class or struct of your own.
+///
+/// Every field must be in the document, unless it is nullable or has a default. A value that
+/// does not fit throws `.type`, and its message names the key, such as `'server.port' is
+/// missing`. A `time.DateTime` field takes a date, or a date and time, converted to UTC.
+///
+/// ```valk
+/// class Settings {
+///     name: String
+///     port: uint (8080)
+/// }
+///
+/// let settings = yaml.decode_to[Settings](text) ! panic("%{E.message}")
+/// ```
++ fn decode_to[T](text: String) T !Error {
+    let document = decode(text) !>
+    return value_to[T](document, "") !>
+}
+
+fn parse_stream(text: String, single: bool) Array[json.Value] !Error {
+    // A byte order mark is not part of the first line
+    let source = text.starts_with("\xef\xbb\xbf") ? text.range(3, text.length - 3) : text
+    let p = Parser { text: source, buf: ByteBuffer.new(64) }
+    let documents = Array[json.Value]{}
+    let indent = p.scan_lines() !>
+    while true {
+        // `%YAML` and `%TAG` lines
+        let directives = false
+        let version = false
+        p.handles.clear()
+        while indent == 0 && p.peek() == '%' {
+            directives = true
+            version = p.read_directive(version) !>
+            indent = p.next_content() !>
+        }
+        if directives && !(p.peek() == '-' && p.is_marker(p.at)) : p.fail("A directive needs a document after it, started with '---'")
+        if p.done() : break
+        if p.peek() == '.' && p.is_marker(p.at) {
+            // A document end with no document
+            p.at += 3
+            indent = p.next_content() !>
+            continue
+        }
+        if single && documents.length == 1 : p.fail("A second document starts here; use decode_all to read them all")
+        // A mapping or sequence cannot start on the line of `---`
+        let explicit = p.peek() == '-' && p.is_marker(p.at)
+        if explicit : p.at += 3
+
+        p.anchors.clear()
+        p.depth = 0
+        documents.append(p.parse_value(-1, false, !explicit) !>)
+        indent = p.next_content() !>
+        if indent >= 0 : p.fail("Expected the end of the document")
+        if p.peek() == '.' && p.is_marker(p.at) {
+            p.at += 3
+            indent = p.next_content() !>
+        }
+    }
+    return documents
+}
+
+extend Parser {
+    // `%YAML 1.2` or `%TAG !e! tag:example.com,2000:`; other directives are read past. Returns
+    // whether a `%YAML` has been seen.
+    fn read_directive(version: bool) bool !Error {
+        let start = this.at
+        this.at++
+        let name = this.read_name()
+        this.skip_spaces()
+        if name == "YAML" {
+            if version : this.fail_at(start, "A document can only have one \%YAML directive")
+            let number_start = this.at
+            while is_digit(this.peek()) || this.peek() == '.' : this.at++
+            let number = this.text.range(number_start, this.at - number_start)
+            if !number.starts_with("1.") || number.length < 3 : this.fail_at(number_start, "This reads YAML 1.x, not '" + number + "'")
+            return true
+        }
+        if name == "TAG" {
+            let handle = this.read_name()
+            this.skip_spaces()
+            let prefix_start = this.at
+            while !is_blank(this.peek()) : this.at++
+            let prefix = this.text.range(prefix_start, this.at - prefix_start)
+            if !handle.starts_with("!") || !handle.ends_with("!") || prefix.length == 0 : this.fail_at(start, "Expected '\%TAG !handle! prefix'")
+            this.handles.set(handle, prefix)
+            return version
+        }
+        this.skip_to_break()
+        return version
+    }
+}

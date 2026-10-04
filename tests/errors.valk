@@ -1,0 +1,103 @@
+use yaml
+
+// Whether reading `text` throws `code` at `line` and `column`; a line of 0 is not checked
+fn fails(text: String, code: String, line: uint, column: uint) bool {
+    yaml.decode_all(text) ! {
+        let got = "other"
+        if error_is(E.code, syntax) : got = "syntax"
+        else if error_is(E.code, duplicate) : got = "duplicate"
+        else if error_is(E.code, type) : got = "type"
+        else if error_is(E.code, limit) : got = "limit"
+        if got != code || (line > 0 && (E.line != line || E.column != column)) {
+            println("\"" + text.escape() + "\": " + E.message + " at line " + E.line + ", column " + E.column)
+            return false
+        }
+        return true
+    }
+    println("\"" + text.escape() + "\" was read")
+    return false
+}
+
+test "Syntax errors say where" {
+    assert(fails("a: [1, 2\n", "syntax", 1, 4))
+    assert(fails("a: {b: 1\n", "syntax", 1, 4))
+    assert(fails("a: \"unclosed\nb: 1\n", "syntax", 1, 4))
+    assert(fails("a: 'unclosed\n", "syntax", 1, 4))
+    assert(fails("a: b: c\n", "syntax", 1, 4))
+    assert(fails("a:\n  b: 1\n c: 2\n", "syntax", 3, 2))
+    assert(fails("key: value\n  more: x\n", "syntax", 2, 7))
+    assert(fails("- a\nb: 1\n", "syntax", 2, 1))
+    assert(fails("a: 1\n- b\n", "syntax", 2, 1))
+    assert(fails("a: *missing\n", "syntax", 1, 4))
+    assert(fails("a: \"\\q\"\n", "syntax", 1, 6))
+    assert(fails("a: @x\n", "syntax", 1, 4))
+    assert(fails("[a, b]]\n", "syntax", 1, 7))
+    assert(fails("a:\n\t- x\n", "syntax", 2, 1))
+    assert(fails("a: |\n   \n  x\n", "syntax", 3, 3))
+    assert(fails("a: &x &y 1\n", "syntax", 1, 7))
+    assert(fails("é: [ü\n", "syntax", 1, 4))
+    assert(fails("\%YAML 2.0\n---\na\n", "syntax", 1, 7))
+    assert(fails("\%YAML 1.2\n", "syntax", 0, 0))
+    assert(fails("a: !e!x 1\n", "syntax", 1, 4))
+}
+
+test "Unsupported keys" {
+    // A mapping or sequence cannot be a key: a JSON object only has text keys
+    assert(fails("[a, b]: c\n", "syntax", 0, 0))
+    assert(fails("? [a]\n: b\n", "syntax", 0, 0))
+    assert(fails("{[a]: b}\n", "syntax", 0, 0))
+}
+
+test "Duplicate keys" {
+    assert(fails("a: 1\nb: 2\na: 3\n", "duplicate", 3, 1))
+    assert(fails("{a: 1, a: 2}\n", "duplicate", 1, 8))
+    // Merged keys are not duplicates: the mapping's own win
+    let document = yaml.decode("x: &x {a: 1}\ny:\n  <<: *x\n  a: 2\n") ! { assert(false) return }
+    assert(document["y"]["a"].int == 2)
+}
+
+test "Tags that do not fit" {
+    assert(fails("a: !!int x\n", "type", 0, 0))
+    assert(fails("a: !!float x\n", "type", 0, 0))
+    assert(fails("a: !!bool yes\n", "type", 0, 0))
+    assert(fails("a: !!str [1]\n", "type", 0, 0))
+    assert(fails("<<: 1\n", "syntax", 1, 1))
+}
+
+test "More than one document" {
+    yaml.decode("a: 1\n---\nb: 2\n") ! {
+        assert(error_is(E.code, syntax))
+        assert(E.line == 2)
+        return
+    }
+    assert(false)
+}
+
+test "Alias bombs are bounded" {
+    let text = "
+a: &a [x, x, x, x, x, x, x, x, x, x]
+b: &b [*a, *a, *a, *a, *a, *a, *a, *a, *a, *a]
+c: &c [*b, *b, *b, *b, *b, *b, *b, *b, *b, *b]
+d: &d [*c, *c, *c, *c, *c, *c, *c, *c, *c, *c]
+e: &e [*d, *d, *d, *d, *d, *d, *d, *d, *d, *d]
+f: &f [*e, *e, *e, *e, *e, *e, *e, *e, *e, *e]
+g: &g [*f, *f, *f, *f, *f, *f, *f, *f, *f, *f]
+h: &h [*g, *g, *g, *g, *g, *g, *g, *g, *g, *g]
+i: &i [*h, *h, *h, *h, *h, *h, *h, *h, *h, *h]
+"
+    yaml.decode(text) ! {
+        assert(error_is(E.code, limit))
+        assert(E.line > 0)
+        return
+    }
+    assert(false)
+}
+
+test "Nesting is bounded" {
+    assert(fails("[".repeat(300) + "]".repeat(300), "limit", 0, 0))
+    assert(fails("- ".repeat(300) + "x\n", "limit", 0, 0))
+}
+
+test "An anchor is not known inside itself" {
+    assert(fails("a: &a [*a]\n", "syntax", 1, 8))
+}

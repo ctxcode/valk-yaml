@@ -1,0 +1,330 @@
+use valk.json
+
+// Containers may nest this deep: every level costs stack, and programs run on a 1 MiB stack
+value MAX_DEPTH (256)
+// Aliases may add this many values to a document before the ratio to the values written out
+// counts; past both, the document is an alias bomb
+value ALIAS_LIMIT (1_000_000)
+value ALIAS_RATIO (10)
+
+class Anchor {
+    value: json.Value
+    // How many values the anchored node holds, aliases inside it expanded
+    size: uint
+}
+
+// The anchor and tag in front of a node
+struct Props {
+    anchor: String ("")
+    tag: String ("")
+}
+
+// The cursor over the text, and what a document has collected so far
+class Parser {
+    text: String
+    at: uint (0)
+    anchors: Map[Anchor] (.{})
+    // Values made, aliases expanded included, and how many of those came from aliases
+    nodes: uint (0)
+    expanded: uint (0)
+    depth: uint (0)
+    // `%TAG` handles
+    handles: Map[String] (.{})
+    // Where `next_content` last stopped, so asking again does not move on
+    content_at: uint (uint.$max)
+    content_indent: int (-1)
+    buf: ByteBuffer
+    // The text of the last scalar read in a flow collection, for when it turns out to be a key
+    scalar_text: ?String (null)
+    scalar_plain: bool (false)
+
+    fn done() bool {
+        return this.at >= this.text.length
+    }
+    fn peek() u8 {
+        return this.text[this.at]
+    }
+    fn peek_at(ahead: uint) u8 {
+        return this.text[this.at + ahead]
+    }
+
+    fn skip_spaces() {
+        let text = this.text
+        let at = this.at
+        while true {
+            let ch = text[at]
+            if ch != ' ' && ch != '\t' : break
+            at++
+        }
+        this.at = at
+    }
+    fn skip_to_break() {
+        let text = this.text
+        let len = text.length
+        let at = this.at
+        while at < len {
+            let ch = text[at]
+            if ch == '\n' || ch == '\r' : break
+            at++
+        }
+        this.at = at
+    }
+    fn skip_break() {
+        let ch = this.peek()
+        if ch == '\r' {
+            this.at++
+            if this.peek() == '\n' : this.at++
+        } else if ch == '\n' {
+            this.at++
+        }
+    }
+    fn at_break() bool {
+        let ch = this.peek()
+        return ch == '\n' || ch == '\r' || this.done()
+    }
+    // Nothing more on this line but spaces and maybe a comment
+    fn at_line_end() bool {
+        let ch = this.peek()
+        return ch == '#' || ch == '\n' || ch == '\r' || this.done()
+    }
+    // `- ` here: a sequence entry
+    fn at_entry() bool {
+        return this.peek() == '-' && is_blank(this.peek_at(1))
+    }
+    // `---` or `...` at `pos`, which must start a line
+    fn is_marker(pos: uint) bool {
+        let text = this.text
+        let ch = text[pos]
+        if ch != '-' && ch != '.' : return false
+        return text[pos + 1] == ch && text[pos + 2] == ch && is_blank(text[pos + 3])
+    }
+
+    // The column of the cursor, counting from 0
+    fn column() int {
+        let text = this.text
+        let i = this.at
+        while i > 0 {
+            let ch = text[i - 1]
+            if ch == '\n' || ch == '\r' : break
+            i--
+        }
+        return (this.at - i).to(int)
+    }
+
+    // Finishes the line the cursor is on, which may only hold spaces and a comment, and moves to
+    // the first value on the lines after it. Returns its indent, or -1 at the end of the text or a
+    // document marker.
+    fn next_content() int !Error {
+        if this.at == this.content_at : return this.content_indent
+        this.skip_spaces()
+        let ch = this.peek()
+        if ch == '#' {
+            if this.at > 0 && !is_blank(this.text[this.at - 1]) : this.fail("A comment needs a space before its '#'")
+            this.skip_to_break()
+        } else if !this.at_break() {
+            this.fail("Expected the end of the line, found '" + show_byte(ch) + "'")
+        }
+        this.skip_break()
+        return this.scan_lines() !>
+    }
+
+    // From the start of a line: skips empty lines and comments, and stops at the first value
+    fn scan_lines() int !Error {
+        let text = this.text
+        let len = text.length
+        while true {
+            let start = this.at
+            if start >= len : return this.mark_content(-1)
+            let i = start
+            while text[i] == ' ' : i++
+            let ch = text[i]
+            if ch == '\t' {
+                let j = i
+                while text[j] == ' ' || text[j] == '\t' : j++
+                let after = text[j]
+                if j < len && after != '\n' && after != '\r' && after != '#' && after != '[' && after != '{' {
+                    this.at = i
+                    this.fail("A tab cannot indent a line, use spaces")
+                }
+                i = j
+                ch = after
+            }
+            this.at = i
+            if i >= len : return this.mark_content(-1)
+            if ch == '\n' || ch == '\r' {
+                this.skip_break()
+                continue
+            }
+            if ch == '#' {
+                this.skip_to_break()
+                this.skip_break()
+                continue
+            }
+            let indent = (i - start).to(int)
+            if indent == 0 && this.is_marker(i) : return this.mark_content(-1)
+            return this.mark_content(indent)
+        }
+    }
+    fn mark_content(indent: int) int {
+        this.content_at = this.at
+        this.content_indent = indent
+        return indent
+    }
+
+    // `&anchor` and `!tag`, in either order
+    fn read_props() Props !Error {
+        let props = Props{}
+        while true {
+            let ch = this.peek()
+            if ch == '&' {
+                if props.anchor.length > 0 : this.fail("A value has two anchors")
+                this.at++
+                props.anchor = this.read_name()
+                if props.anchor.length == 0 : this.fail("An anchor needs a name after '&'")
+            } else if ch == '!' {
+                if props.tag.length > 0 : this.fail("A value has two tags")
+                props.tag = this.read_tag() !>
+            } else {
+                break
+            }
+            this.skip_spaces()
+        }
+        return props
+    }
+
+    // The name of an anchor or alias: up to a space or a flow indicator
+    fn read_name() String {
+        let text = this.text
+        let start = this.at
+        let at = start
+        while true {
+            let ch = text[at]
+            if is_blank(ch) || is_flow_indicator(ch) : break
+            at++
+        }
+        this.at = at
+        return text.range(start, at - start)
+    }
+
+    // `!`, `!local`, `!!core`, `!handle!name` or `!<verbatim>`; the core ones come back in full
+    fn read_tag() String !Error {
+        let text = this.text
+        let start = this.at
+        if text[start + 1] == '<' {
+            let close = text.index_of_byte('>', start) ! this.fail("A verbatim tag needs a '>' at its end")
+            this.at = close + 1
+            return text.range(start + 2, close - start - 2)
+        }
+        let at = start + 1
+        while true {
+            let ch = text[at]
+            if is_blank(ch) || is_flow_indicator(ch) : break
+            at++
+        }
+        this.at = at
+        let tag = text.range(start, at - start)
+        // The handle is `!`, `!!` or `!name!`
+        let end = tag.index_of_byte('!', 1) !? 0
+        let handle = tag.range(0, end + 1)
+        let prefix = this.handles.get(handle) ! {
+            if handle == "!!" : return "tag:yaml.org,2002:" + tag.range(2, tag.length - 2)
+            if handle != "!" : this.fail_at(start, "The tag handle '" + handle + "' is not declared with \%TAG")
+            return tag
+        }
+        return prefix + tag.range(handle.length, tag.length - handle.length)
+    }
+
+    // `*name`: the value anchored under that name
+    fn read_alias() json.Value !Error {
+        let pos = this.at
+        this.at++
+        let name = this.read_name()
+        if name.length == 0 : this.fail("An alias needs a name after '*'")
+        let anchor = this.anchors.get(name) ! this.fail_at(pos, "The alias '*" + name + "' has no anchor before it")
+        this.nodes += anchor.size
+        this.expanded += anchor.size
+        if this.expanded > ALIAS_LIMIT && this.expanded > (this.nodes - this.expanded) * ALIAS_RATIO {
+            throw .limit { message: "Aliases expand to too many values", line: this.line_of(pos), column: this.column_of(pos) }
+        }
+        return anchor.value
+    }
+
+    // The tag check for a collection, and its anchor
+    fn finish(props: Props, value: json.Value, before: uint) json.Value !Error {
+        let tag = props.tag
+        if is_scalar_tag(tag) || is_seq_tag(tag) || is_map_tag(tag) {
+            if value.is_array && !is_seq_tag(tag) : this.fail_type("A sequence cannot have the tag '" + tag + "'")
+            if value.is_object && !is_map_tag(tag) : this.fail_type("A mapping cannot have the tag '" + tag + "'")
+        }
+        if props.anchor.length > 0 {
+            let size = this.nodes - before
+            this.anchors.set(props.anchor, Anchor { value: value, size: size > 0 ? size : 1 })
+        }
+        return value
+    }
+
+    fn enter() !Error {
+        this.depth++
+        if this.depth > MAX_DEPTH {
+            throw .limit { message: "Values nest deeper than " + MAX_DEPTH + " levels", line: this.line_of(this.at), column: this.column_of(this.at) }
+        }
+    }
+
+    fn line_of(pos: uint) uint {
+        let text = this.text
+        let line: uint = 1
+        let i: uint = 0
+        while i < pos && i < text.length {
+            let ch = text[i]
+            if ch == '\n' || (ch == '\r' && text[i + 1] != '\n') : line++
+            i++
+        }
+        return line
+    }
+    // Columns count characters, not bytes
+    fn column_of(pos: uint) uint {
+        let text = this.text
+        if pos > text.length : pos = text.length
+        let start = pos
+        while start > 0 {
+            let ch = text[start - 1]
+            if ch == '\n' || ch == '\r' : break
+            start--
+        }
+        let column: uint = 1
+        let i = start
+        while i < pos {
+            if (text[i] & 0xc0) != 0x80 : column++
+            i++
+        }
+        return column
+    }
+
+    fn fail(message: String) !Error $throw {
+        this.fail_at(this.at, message) !>
+    }
+    fn fail_at(pos: uint, message: String) !Error $throw {
+        throw .syntax { message: message, line: this.line_of(pos), column: this.column_of(pos) }
+    }
+    fn fail_type(message: String) !Error $throw {
+        throw .type { message: message, line: this.line_of(this.at), column: this.column_of(this.at) }
+    }
+    fn fail_duplicate(pos: uint, key: String) !Error $throw {
+        throw .duplicate { message: "The key '" + key + "' is given twice", line: this.line_of(pos), column: this.column_of(pos) }
+    }
+}
+
+fn is_blank(ch: u8) bool {
+    return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == 0
+}
+fn is_break(ch: u8) bool {
+    return ch == '\n' || ch == '\r'
+}
+fn is_flow_indicator(ch: u8) bool {
+    return ch == ',' || ch == '[' || ch == ']' || ch == '{' || ch == '}'
+}
+fn show_byte(ch: u8) String {
+    if ch == 0 : return "the end of the text"
+    if ch == '\t' : return "\\t"
+    return ch.to_ascii_string()
+}
