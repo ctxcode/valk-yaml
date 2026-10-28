@@ -112,7 +112,7 @@ test "Strings over several lines are literal blocks" {
     assert(text.contains("list:\n  - |\n    in\n    a list\n"))
 
     let back = read(text)
-    each document.values as value, key {
+    each document as value, key {
         if back[key].string != value.string {
             println(key + " read back as \"" + back[key].string.escape() + "\"")
             assert(false)

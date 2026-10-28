@@ -14,7 +14,7 @@ fn value_to[T](value: json.Value, path: String) T !Error {
     #elif T.$nonnull.$is_type_of(Array[time.DateTime])
     if !value.is_array : throw .type { message: "'" + path + "' should be an array of dates" }
     let dates = Array[time.DateTime]{}
-    each value.array.values as item, index {
+    each value.array as item, index {
         dates.append(value_to[time.DateTime](item, path + "[" + index + "]") !>)
     }
     return dates

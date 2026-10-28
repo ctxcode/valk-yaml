@@ -61,14 +61,14 @@ fn mark_specials(value: json.Value) json.Value {
             if number.is_infinite() : return number > 0 ? "<inf>" : "<-inf>"
             return number
         }
-        json.ArrayValue as array => {
+        Array[json.Value] as array => {
             let items = Array[json.Value]{}
-            each array.values as item : items.append(mark_specials(item))
+            each array as item : items.append(mark_specials(item))
             return json.new_array(items)
         }
-        json.ObjectValue as object => {
+        Map[json.Value] as object => {
             let members = Map[json.Value]{}
-            each object.values as item, key : members.set(key, mark_specials(item))
+            each object as item, key : members.set(key, mark_specials(item))
             return json.new_object(members)
         }
         default => return value

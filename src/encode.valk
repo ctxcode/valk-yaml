@@ -34,12 +34,12 @@ use valk.json
 
 fn write_document(out: ByteBuffer, value: json.Value) {
     match value {
-        json.ObjectValue as object => {
-            if object.values.length == 0 : out.write("{}\n")
+        Map[json.Value] as object => {
+            if object.length == 0 : out.write("{}\n")
             else : write_entries(out, object, 0, false)
         }
-        json.ArrayValue as array => {
-            if array.values.length == 0 : out.write("[]\n")
+        Array[json.Value] as array => {
+            if array.length == 0 : out.write("[]\n")
             else : write_items(out, array, 0, false)
         }
         String as text => {
@@ -59,24 +59,24 @@ fn write_document(out: ByteBuffer, value: json.Value) {
 }
 
 // The keys of a mapping at `indent`; with `inline` the first one goes on the current line
-fn write_entries(out: ByteBuffer, object: json.ObjectValue, indent: uint, inline: bool) {
+fn write_entries(out: ByteBuffer, object: Map[json.Value], indent: uint, inline: bool) {
     let first = true
-    each object.values as value, key {
+    each object as value, key {
         if !first || !inline : out.fill(' ', indent)
         first = false
         write_string(out, key)
         out.write_byte(':')
         match value {
-            json.ObjectValue as child => {
-                if child.values.length == 0 {
+            Map[json.Value] as child => {
+                if child.length == 0 {
                     out.write(" {}\n")
                 } else {
                     out.write_byte('\n')
                     write_entries(out, child, indent + 2, false)
                 }
             }
-            json.ArrayValue as array => {
-                if array.values.length == 0 {
+            Array[json.Value] as array => {
+                if array.length == 0 {
                     out.write(" []\n")
                 } else {
                     out.write_byte('\n')
@@ -89,21 +89,21 @@ fn write_entries(out: ByteBuffer, object: json.ObjectValue, indent: uint, inline
 }
 
 // The items of a sequence, their `-` at `indent`
-fn write_items(out: ByteBuffer, array: json.ArrayValue, indent: uint, inline: bool) {
-    each array.values as item, index {
+fn write_items(out: ByteBuffer, array: Array[json.Value], indent: uint, inline: bool) {
+    each array as item, index {
         if index > 0 || !inline : out.fill(' ', indent)
         out.write_byte('-')
         match item {
-            json.ObjectValue as object => {
-                if object.values.length == 0 {
+            Map[json.Value] as object => {
+                if object.length == 0 {
                     out.write(" {}\n")
                 } else {
                     out.write_byte(' ')
                     write_entries(out, object, indent + 2, true)
                 }
             }
-            json.ArrayValue as nested => {
-                if nested.values.length == 0 {
+            Array[json.Value] as nested => {
+                if nested.length == 0 {
                     out.write(" []\n")
                 } else {
                     out.write_byte(' ')

@@ -277,9 +277,9 @@ extend Parser {
     // `<<` takes a mapping, or a sequence of mappings
     fn check_merge(value: json.Value, pos: uint) !Error {
         match value {
-            json.ObjectValue as _ => return
-            json.ArrayValue as list => {
-                each list.values as item {
+            Map[json.Value] as _ => return
+            Array[json.Value] as list => {
+                each list as item {
                     if !item.is_object : this.fail_at(pos, "A merge key ('<<') takes a mapping or a list of mappings")
                 }
                 return
@@ -295,11 +295,11 @@ extend Parser {
         let result = Map[json.Value]{}
         each merges as merge {
             match merge {
-                json.ObjectValue as object => merge_into(result, object)
-                json.ArrayValue as list => {
-                    each list.values as item {
+                Map[json.Value] as object => merge_into(result, object)
+                Array[json.Value] as list => {
+                    each list as item {
                         match item {
-                            json.ObjectValue as object => merge_into(result, object)
+                            Map[json.Value] as object => merge_into(result, object)
                             default => {}
                         }
                     }
@@ -312,8 +312,8 @@ extend Parser {
     }
 }
 
-fn merge_into(result: Map[json.Value], object: json.ObjectValue) {
-    each object.values as value, key {
+fn merge_into(result: Map[json.Value], object: Map[json.Value]) {
+    each object as value, key {
         if !result.has(key) : result.set(key, value)
     }
 }

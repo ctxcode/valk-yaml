@@ -3,7 +3,7 @@
 YAML for [Valk](https://valk-lang.dev): reading and writing YAML 1.2, straight into and out of
 your own classes. Purely written in Valk, with no os-package dependencies.
 
-Requires Valk 0.7.8 or newer.
+Requires Valk 0.8.1 or newer.
 
 ## Install
 
@@ -52,7 +52,7 @@ everything that works with JSON works here:
 let document = yaml.decode(text) ! panic("%{E.message}")
 println(document["server"]["port"].int)
 println(document["tags"][0].string)
-each document["servers"].array.values as server : println(server["name"].string)
+each document["servers"].array as server : println(server["name"].string)
 ```
 
 `yaml.encode(document)` writes one back out. A text with several documents, separated by `---`,
