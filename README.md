@@ -3,7 +3,7 @@
 YAML for [Valk](https://valk-lang.dev): reading and writing YAML 1.2, straight into and out of
 your own classes. Purely written in Valk, with no os-package dependencies.
 
-Requires Valk 0.8.1 or newer.
+Requires Valk 0.8.10 or newer.
 
 ## Install
 
@@ -42,6 +42,23 @@ Every field of the class must be in the document, unless it is nullable or has a
 error names the key: `'server.host' is missing`, `'server.port' should be an integer that fits
 the field`. A `time.DateTime` field takes a YAML timestamp (`2001-12-14t21:59:43.10-05:00`,
 `2002-12-14`), converted to UTC.
+
+### Field tags
+
+Field metadata tags customize how fields are encoded and decoded:
+
+```rust
+class Server {
+    host: String ("127.0.0.1") `yaml: "bind-host"`
+    port: uint (8080)
+    tls_cert: ?String (null) `yaml: "tls-cert", omitempty`
+    cached_addr: String ("") `yaml: "-"`
+}
+```
+
+- `` `yaml: "name"` `` or `$tag(yaml: "name")`: maps the field to a different YAML key.
+- `` `yaml: "-"` `` or `$tag(yaml: "-")`: skips the field on encode and fills its default value on decode.
+- `$tag(omitempty)` (or `` `yaml: "name", omitempty` ``): omits zero, empty, or null values on encode, and allows missing or `null` values on decode when the field has a default value.
 
 ## When the shape is not fixed
 

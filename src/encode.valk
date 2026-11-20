@@ -28,6 +28,9 @@ use valk.json
 
 /// Writes a class or struct of your own as YAML, the way `json.from` would read it; a
 /// `time.DateTime` field is written as a date and time in UTC.
+///
+/// Field tags control encoding: `$tag(yaml: "name")` (or `` `yaml: "name"` ``) renames a key,
+/// `$tag(yaml: "-")` skips a field, and `$tag(omitempty)` omits zero, empty, or null values.
 + fn encode_of(value: $T) String {
     return encode(value_from(value, Array[uint]{}))
 }

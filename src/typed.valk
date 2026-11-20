@@ -7,18 +7,13 @@ use valk.time
 fn value_to[T](value: json.Value, path: String) T !Error {
     #if T.$is_nullable
     if value.is_null : return null
-    #end
-    #if T.$nonnull.$is_type_of(time.DateTime)
+    return value_to[T.$nonnull](value, path) !>
+    #elif T.$is_type_of(time.DateTime)
     let text = value.is_string ? value.string : ""
     return parse_datetime(text) ?! throw .type { message: "'" + path + "' should be a date, or a date and time" }
-    #elif T.$nonnull.$is_type_of(Array[time.DateTime])
-    if !value.is_array : throw .type { message: "'" + path + "' should be an array of dates" }
-    let dates = Array[time.DateTime]{}
-    each value.array as item, index {
-        dates.append(value_to[time.DateTime](item, path + "[" + index + "]") !>)
-    }
-    return dates
-    #elif T.$nonnull.$is_type_of(json.Value) || T.$nonnull.$is_type_of(String) || T.$is_integer || T.$is_float || T.$is_bool || T.$has_method(from_json_value) || T.$has_method(from_json_value_auto) || !T.$is_structural
+    #elif T.$has_method(from_yaml_value)
+    return T.from_yaml_value(value, path) !>
+    #elif T.$is_type_of(json.Value) || T.$is_type_of(String) || T.$is_integer || T.$is_float || T.$is_bool || T.$has_method(from_json_value) || T.$has_method(from_json_value_auto) || !T.$is_structural
     return value.to_type[T]() ! throw .type { message: "'" + path + "' should be " + expected_kind[T]() }
     #else
     if !value.is_object : throw .type { message: "'" + path + "' should be a mapping" }
@@ -26,14 +21,23 @@ fn value_to[T](value: json.Value, path: String) T !Error {
     let result = T {
         #loop properties T as prop
         prop: <{
-            let key = path.is_empty() ? prop.name : path + "." + prop.name
-            #if prop.$has_explicit_default_value || prop.$type.$is_nullable
-            let field = source.get(prop.name) ! return prop.$default_value
+            #if prop.$tag("yaml") == "-"
+            #if prop.$has_default_value
+            return prop.$default_value
+            #else
+            #error "Skipped YAML property has no default value"
+            #end
+            #else
+            let name = prop.$tag("yaml", prop.name)
+            let key = path.is_empty() ? name : path + "." + name
+            #if prop.$has_explicit_default_value || prop.$type.$is_nullable || (prop.$has_tag("omitempty") && prop.$has_default_value)
+            let field = source.get(name) ! return prop.$default_value
             if field.is_null : return prop.$default_value
             return value_to[prop](field, key) !>
             #else
-            let field = source.get(prop.name) ! throw .type { message: "'" + key + "' is missing" }
+            let field = source.get(name) ! throw .type { message: "'" + key + "' is missing" }
             return value_to[prop](field, key) !>
+            #end
             #end
         }
         #end
@@ -42,38 +46,199 @@ fn value_to[T](value: json.Value, path: String) T !Error {
     #end
 }
 
+fn is_empty_value(data: $T) bool {
+    #if T.$is_nullable
+    if !isset(data) : return true
+    return is_empty_value(data)
+    #elif T.$is_type_of(json.Value)
+    if data.is_null : return true
+    if data.is_string : return data.string.bytes == 0
+    if data.is_array : return data.array.length == 0
+    if data.is_object : return data.object.length == 0
+    if data.is_bool : return !data.bool
+    if data.is_int : return data.int == 0
+    if data.is_float : return data.float == 0.0
+    return false
+    #elif T.$is_type_of(String)
+    return data.bytes == 0
+    #elif T.$has_method(is_json_empty)
+    return data.is_json_empty()
+    #elif T.$is_bool
+    return !data
+    #elif T.$is_integer
+    #if T.$is_signed
+    return data.to(int) == 0
+    #else
+    return data.to(uint) == 0
+    #end
+    #elif T.$is_float
+    return data == 0.0
+    #else
+    return false
+    #end
+}
+
 // `data` as a JSON value, as `json.from` makes it, with dates as ISO 8601 text. `stack` holds the
 // objects being written, so one that holds itself becomes "(recursion)" as there.
 fn value_from(data: $T, stack: Array[uint]) json.Value {
-    #if T.$nonnull.$is_type_of(time.DateTime)
-    @unsafe
+    #if T.$is_nullable
     if !isset(data) : return null
+    return value_from(data, stack)
+    #elif T.$is_type_of(time.DateTime)
     return json.new_string(data.to_iso8601())
-    #elif T.$nonnull.$is_type_of(Array[time.DateTime])
-    @unsafe
-    if !isset(data) : return null
-    let values = Array[json.Value]{}
-    each data as date : values.append(value_from(date, stack))
-    return json.new_array(values)
-    #elif T.$nonnull.$is_type_of(json.Value) || T.$nonnull.$is_type_of(String) || T.$is_integer || T.$is_float || T.$is_bool || T.$has_method(to_json_value) || T.$has_method(to_json_value_with_stack) || !T.$is_structural
+    #elif T.$has_method(to_yaml_value)
+    return data.to_yaml_value(stack)
+    #elif T.$has_method(to_json_string)
+    return json.new_string(data.to_json_string())
+    #elif T.$is_type_of(json.Value) || T.$is_type_of(String) || T.$is_integer || T.$is_float || T.$is_bool || T.$has_method(to_json_value) || T.$has_method(to_json_value_with_stack) || !T.$is_structural
     return json.from(data)
     #else
-    @unsafe
-    if !isset(data) : return null
     #if T.$is_pointer
+    @unsafe
     let node = data.@cast(ptr).@cast(uint)
     if stack.contains(node) : return json.new_string("(recursion)")
     stack.append(node)
     #end
     let values = Map[json.Value]{}
     #loop object data as prop
-    values.set(prop.name, value_from(prop, stack))
+    #if prop.$tag("yaml") != "-"
+    #if prop.$has_tag("omitempty")
+    if !is_empty_value(prop) {
+        values.set(prop.$tag("yaml", prop.name), value_from(prop, stack))
+    }
+    #else
+    values.set(prop.$tag("yaml", prop.name), value_from(prop, stack))
+    #end
+    #end
     #end
     #if T.$is_pointer
     stack.pop_last() _
     #end
     return json.new_object(values)
     #end
+}
+
+extend Array[YAML_ITEM] {
+    - fn to_yaml_value(stack: Array[uint]) json.Value {
+        #if YAML_ITEM.$is_raw_pointer
+        @unsafe
+        #end
+        let result = Array[json.Value]{}
+        each this as item {
+            result.append(value_from(item, stack))
+        }
+        return json.new_array(result)
+    }
+
+    - static fn from_yaml_value(value: json.Value, path: String) SELF !Error {
+        if !value.is_array : throw .type { message: "'" + path + "' should be a sequence" }
+        let result = SELF.new()
+        each value.array as item, index {
+            result.append(value_to[YAML_ITEM](item, path + "[" + index + "]") !>)
+        }
+        return result
+    }
+}
+
+extend HashMap[YAML_KEY, YAML_VALUE] {
+    #if YAML_KEY.$is_type_of(String)
+    - fn to_yaml_value(stack: Array[uint]) json.Value {
+        let result = Map[json.Value]{}
+        each this as item, key {
+            result.set(key, value_from(item, stack))
+        }
+        return json.new_object(result)
+    }
+
+    - static fn from_yaml_value(value: json.Value, path: String) SELF !Error {
+        if !value.is_object : throw .type { message: "'" + path + "' should be a mapping" }
+        let result = SELF.new()
+        each value.object as item, key {
+            let item_path = path.is_empty() ? key : path + "." + key
+            result.set(key, value_to[YAML_VALUE](item, item_path) !>)
+        }
+        return result
+    }
+    #elif YAML_KEY.$is_integer && !YAML_KEY.$is_enum
+    - fn to_yaml_value(stack: Array[uint]) json.Value {
+        let result = Map[json.Value]{}
+        each this as item, key {
+            result.set(key.to_string(), value_from(item, stack))
+        }
+        return json.new_object(result)
+    }
+
+    - static fn from_yaml_value(value: json.Value, path: String) SELF !Error {
+        if !value.is_object : throw .type { message: "'" + path + "' should be a mapping" }
+        let result = SELF.new()
+        each value.object as item, key {
+            let item_path = path.is_empty() ? key : path + "." + key
+            let number = key.to(YAML_KEY) ! throw .type { message: "'" + item_path + "' should have an integer key" }
+            result.set(number, value_to[YAML_VALUE](item, item_path) !>)
+        }
+        return result
+    }
+    #end
+}
+
+extend FlatMap[YAML_FLAT_KEY, YAML_FLAT_VALUE] {
+    #if YAML_FLAT_KEY.$is_type_of(String)
+    - fn to_yaml_value(stack: Array[uint]) json.Value {
+        let result = Map[json.Value]{}
+        each this as item, key {
+            result.set(key, value_from(item, stack))
+        }
+        return json.new_object(result)
+    }
+
+    - static fn from_yaml_value(value: json.Value, path: String) SELF !Error {
+        if !value.is_object : throw .type { message: "'" + path + "' should be a mapping" }
+        let result = SELF.new()
+        each value.object as item, key {
+            let item_path = path.is_empty() ? key : path + "." + key
+            result.set(key, value_to[YAML_FLAT_VALUE](item, item_path) !>)
+        }
+        return result
+    }
+    #end
+}
+
+extend HashSet[YAML_SET_ITEM] {
+    - fn to_yaml_value(stack: Array[uint]) json.Value {
+        let result = Array[json.Value]{}
+        each this as item {
+            result.append(value_from(item, stack))
+        }
+        return json.new_array(result)
+    }
+
+    - static fn from_yaml_value(value: json.Value, path: String) SELF !Error {
+        if !value.is_array : throw .type { message: "'" + path + "' should be a sequence" }
+        let result = SELF.new()
+        each value.array as item, index {
+            result.add(value_to[YAML_SET_ITEM](item, path + "[" + index + "]") !>)
+        }
+        return result
+    }
+}
+
+extend Deque[YAML_DEQUE_ITEM] {
+    - fn to_yaml_value(stack: Array[uint]) json.Value {
+        let result = Array[json.Value]{}
+        each this as item {
+            result.append(value_from(item, stack))
+        }
+        return json.new_array(result)
+    }
+
+    - static fn from_yaml_value(value: json.Value, path: String) SELF !Error {
+        if !value.is_array : throw .type { message: "'" + path + "' should be a sequence" }
+        let result = SELF.new()
+        each value.array as item, index {
+            result.push_back(value_to[YAML_DEQUE_ITEM](item, path + "[" + index + "]") !>)
+        }
+        return result
+    }
 }
 
 // A YAML timestamp: a date, or a date and time. One with an offset is converted to UTC, one

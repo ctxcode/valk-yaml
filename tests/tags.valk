@@ -1,0 +1,282 @@
+use yaml
+use valk.json
+use valk.time
+
+struct YamlPoint {
+    x: int $tag(yaml: "px")
+    y: int $tag(yaml: "py", omitempty)
+    scratch: int $tag(yaml: "-")
+}
+
+class YamlEndpoint {
+    host: String `yaml: "bind-host"`
+    port: uint (8080) `yaml: "listen-port"`
+    secret: String ("hidden") `yaml: "-"`
+    internal_id: int $tag(yaml: "-")
+    cached: ?String $tag(yaml: "-")
+}
+
+class YamlConfig {
+    app_name: String $tag(yaml: "app-name")
+    display_title: String ("") `yaml: "display title", omitempty`
+    retries: int $tag(omitempty)
+    max_conn: uint $tag(yaml: "max-conn", omitempty)
+    timeout: float $tag(omitempty)
+    debug: bool $tag(omitempty)
+    note: ?String (null) `yaml: "note", omitempty`
+    tags: Array[String] (.{}) $tag(omitempty)
+    labels: Map[int] (.{}) $tag(omitempty)
+    flags: HashSet[String] (.{}) $tag(omitempty)
+    queue: Deque[int] (.{}) $tag(omitempty)
+    extra: FlatMap[String, int] (.{}) $tag(omitempty)
+    raw: json.Value (null) $tag(omitempty)
+    endpoint: YamlEndpoint `yaml: "http-server"`
+    peers: Array[YamlEndpoint] (.{}) $tag(omitempty)
+    named_peers: Map[YamlEndpoint] (.{}) $tag(omitempty)
+    origin: YamlPoint `yaml: "origin"`
+    internal_token: String ("tok") `yaml: "-"`
+}
+
+class YamlCustomCode {
+    raw: String
+
+    + fn to_json_string() String {
+        return "YAML:" + this.raw
+    }
+
+    + static fn from_json_value(value: json.Value) YamlCustomCode !LookupError {
+        if !value.is_string : throw .missing
+        let text = value.string
+        if !text.starts_with("YAML:") : throw .missing
+        return YamlCustomCode { raw: text.range(5, text.length - 5) }
+    }
+}
+
+class YamlTaggedCustom {
+    code: YamlCustomCode `yaml: "product-code"`
+}
+
+class YamlEventEntry {
+    label: String `yaml: "event-label"`
+    at: time.DateTime `yaml: "happened-at"`
+}
+
+class YamlEventLog {
+    events: Array[YamlEventEntry] `yaml: "event-list"`
+}
+
+test "Field tags: rename, skip, and omitempty on encode" {
+    let cfg = YamlConfig {
+        app_name: "demo"
+        endpoint: YamlEndpoint {
+            host: "127.0.0.1"
+            port: 9090
+            secret: "do-not-leak"
+            internal_id: 99
+            cached: "memo"
+        }
+        origin: YamlPoint { x: 10, y: 0, scratch: 77 }
+        internal_token: "secret-tok"
+    }
+
+    let text = yaml.encode_of(cfg)
+    assert(text.contains("app-name: demo\n"))
+    assert(text.contains("http-server:\n"))
+    assert(text.contains("  bind-host: 127.0.0.1\n"))
+    assert(text.contains("  listen-port: 9090\n"))
+    assert(text.contains("origin:\n"))
+    assert(text.contains("  px: 10\n"))
+
+    // Skipped fields never appear
+    assert(!text.contains("secret"))
+    assert(!text.contains("do-not-leak"))
+    assert(!text.contains("internal_id"))
+    assert(!text.contains("cached"))
+    assert(!text.contains("internal_token"))
+    assert(!text.contains("secret-tok"))
+    assert(!text.contains("scratch"))
+
+    // Empty omitempty fields are omitted
+    assert(!text.contains("display title"))
+    assert(!text.contains("retries"))
+    assert(!text.contains("max-conn"))
+    assert(!text.contains("timeout"))
+    assert(!text.contains("debug"))
+    assert(!text.contains("note"))
+    assert(!text.contains("tags"))
+    assert(!text.contains("labels"))
+    assert(!text.contains("flags"))
+    assert(!text.contains("queue"))
+    assert(!text.contains("extra"))
+    assert(!text.contains("raw"))
+    assert(!text.contains("peers"))
+    assert(!text.contains("named_peers"))
+    assert(!text.contains("py:"))
+}
+
+test "Field tags: non-empty omitempty values and nested containers round-trip" {
+    let flags = HashSet[String]{}
+    flags.add("fast")
+    let queue = Deque[int]{}
+    queue.push_back(1)
+    queue.push_back(2)
+    let extra = FlatMap[String, int]{}
+    extra.set("k", 5)
+    let named = Map[YamlEndpoint]{}
+    named.set("primary", YamlEndpoint { host: "10.0.0.1", port: 8000, secret: "s1" })
+
+    let cfg = YamlConfig {
+        app_name: "full"
+        display_title: "Full App"
+        retries: 3
+        max_conn: 64
+        timeout: 2.5
+        debug: true
+        note: "hello"
+        tags: .{ "a", "b" }
+        labels: .{ "env" => 1 }
+        flags: flags
+        queue: queue
+        extra: extra
+        raw: json.new_string("dyn")
+        endpoint: YamlEndpoint { host: "0.0.0.0", port: 443, secret: "s0" }
+        peers: .{
+            YamlEndpoint { host: "10.0.0.2", port: 8001, secret: "s2" }
+            YamlEndpoint { host: "10.0.0.3", port: 8002, secret: "s3" }
+        }
+        named_peers: named
+        origin: YamlPoint { x: 3, y: 4, scratch: 55 }
+        internal_token: "ignored"
+    }
+
+    let text = yaml.encode_of(cfg)
+    assert(text.contains("display title: Full App\n"))
+    assert(text.contains("retries: 3\n"))
+    assert(text.contains("max-conn: 64\n"))
+    assert(text.contains("timeout: 2.5\n"))
+    assert(text.contains("debug: true\n"))
+    assert(text.contains("note: hello\n"))
+    assert(text.contains("py: 4\n"))
+    assert(!text.contains("s0"))
+    assert(!text.contains("s1"))
+    assert(!text.contains("s2"))
+    assert(!text.contains("s3"))
+
+    let back = yaml.decode_to[YamlConfig](text) ! { println(E.message) assert(false) return }
+    assert(back.app_name == "full")
+    assert(back.display_title == "Full App")
+    assert(back.retries == 3)
+    assert(back.max_conn == 64)
+    assert(back.timeout == 2.5)
+    assert(back.debug)
+    assert(back.note == "hello")
+    assert(back.tags.length == 2)
+    assert(back.labels.get("env") !? 0 == 1)
+    assert(back.flags.has("fast"))
+    assert(back.queue.length == 2)
+    assert(back.extra.get("k") !? 0 == 5)
+    assert(back.raw.string == "dyn")
+    assert(back.endpoint.host == "0.0.0.0")
+    assert(back.endpoint.port == 443)
+    assert(back.endpoint.secret == "hidden")
+    assert(back.endpoint.internal_id == 0)
+    assert(!isset(back.endpoint.cached))
+    assert(back.internal_token == "tok")
+    assert(back.peers.length == 2)
+    assert((back.peers.get(0) !!).host == "10.0.0.2")
+    assert((back.peers.get(1) !!).port == 8002)
+    assert((back.peers.get(1) !!).secret == "hidden")
+    assert((back.named_peers.get("primary") !!).host == "10.0.0.1")
+    assert(back.origin.x == 3)
+    assert(back.origin.y == 4)
+    assert(back.origin.scratch == 0)
+}
+
+test "Field tags: decode missing, null omitempty, and skipped fields use defaults" {
+    let text = "
+app-name: minimal
+retries: null
+note: null
+internal_token: attacker
+http-server:
+  bind-host: localhost
+  secret: override-attempt
+origin:
+  px: 7
+  py: null
+  scratch: 999
+"
+    let cfg = yaml.decode_to[YamlConfig](text) ! { println(E.message) assert(false) return }
+    assert(cfg.app_name == "minimal")
+    assert(cfg.display_title == "")
+    assert(cfg.retries == 0)
+    assert(cfg.max_conn == 0)
+    assert(cfg.timeout == 0.0)
+    assert(!cfg.debug)
+    assert(!isset(cfg.note))
+    assert(cfg.tags.length == 0)
+    assert(cfg.endpoint.host == "localhost")
+    assert(cfg.endpoint.port == 8080)
+    assert(cfg.endpoint.secret == "hidden")
+    assert(cfg.endpoint.internal_id == 0)
+    assert(cfg.internal_token == "tok")
+    assert(cfg.origin.x == 7)
+    assert(cfg.origin.y == 0)
+    assert(cfg.origin.scratch == 0)
+}
+
+test "Field tags: error paths use renamed keys" {
+    let _ = yaml.decode_to[YamlConfig]("
+app-name: x
+http-server:
+  listen-port: 80
+origin:
+  px: 1
+") ! {
+        assert(error_is(E.code, type))
+        assert(E.message == "'http-server.bind-host' is missing")
+        return
+    }
+    assert(false)
+}
+
+test "Field tags: wrong type in nested renamed key reports path" {
+    let _ = yaml.decode_to[YamlConfig]("
+app-name: x
+http-server:
+  bind-host: h
+  listen-port: bad
+origin:
+  px: 1
+") ! {
+        assert(error_is(E.code, type))
+        assert(E.message == "'http-server.listen-port' should be an integer that fits the field")
+        return
+    }
+    assert(false)
+}
+
+test "Field tags: custom to_json_string and from_json_value" {
+    let item = YamlTaggedCustom { code: YamlCustomCode { raw: "XYZ" } }
+    let text = yaml.encode_of(item)
+    assert(text.contains("product-code: YAML:XYZ\n"))
+
+    let back = yaml.decode_to[YamlTaggedCustom](text) ! { println(E.message) assert(false) return }
+    assert(back.code.raw == "XYZ")
+}
+
+test "Field tags: dates inside tagged sequences" {
+    let when = time.DateTime.new(2025, 6, 15, 12, 30, 0) ! { assert(false) return }
+    let log = YamlEventLog {
+        events: .{ YamlEventEntry { label: "deploy", at: when } }
+    }
+    let text = yaml.encode_of(log)
+    assert(text.contains("event-list:\n"))
+    assert(text.contains("event-label: deploy\n"))
+
+    let back = yaml.decode_to[YamlEventLog](text) ! { println(E.message) assert(false) return }
+    assert(back.events.length == 1)
+    let first = back.events.get(0) !!
+    assert(first.label == "deploy")
+    assert(first.at.unix_seconds() == when.unix_seconds())
+}

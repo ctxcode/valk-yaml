@@ -73,9 +73,12 @@ each yaml.decode_all(text) ! panic("%{E.message}") as document {
 
 Reads one YAML document into a class or struct of your own.
 
-Every field must be in the document, unless it is nullable or has a default. A value that
-does not fit throws `.type`, and its message names the key, such as `'server.port' is
-missing`. A `time.DateTime` field takes a date, or a date and time, converted to UTC.
+Every field must be in the document, unless it is nullable or has a default. Field tags
+control decoding: `$tag(yaml: "name")` (or `` `yaml: "name"` ``) matches a renamed key,
+`$tag(yaml: "-")` skips a field (using its default value), and `$tag(omitempty)` allows
+missing or `null` values when the field has a default. A value that does not fit throws
+`.type`, and its message names the key, such as `'server.port' is missing`. A
+`time.DateTime` field takes a date, or a date and time, converted to UTC.
 
 ```valk
 class Settings {
@@ -107,3 +110,6 @@ Writes several YAML documents, with `---` between them.
 
 Writes a class or struct of your own as YAML, the way `json.from` would read it; a
 `time.DateTime` field is written as a date and time in UTC.
+
+Field tags control encoding: `$tag(yaml: "name")` (or `` `yaml: "name"` ``) renames a key,
+`$tag(yaml: "-")` skips a field, and `$tag(omitempty)` omits zero, empty, or null values.
