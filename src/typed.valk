@@ -10,13 +10,13 @@ fn value_to[T](value: json.Value, path: String) T !Error {
     return value_to[T.$nonnull](value, path) !>
     #elif T.$is_type_of(time.DateTime)
     let text = value.is_string ? value.string : ""
-    return parse_datetime(text) ?! throw .type { message: "'" + path + "' should be a date, or a date and time" }
+    return parse_datetime(text) ?! throw .type("'" + path + "' should be a date, or a date and time", 0, 0)
     #elif T.$has_method(from_yaml_value)
     return T.from_yaml_value(value, path) !>
     #elif T.$is_type_of(json.Value) || T.$is_type_of(String) || T.$is_integer || T.$is_float || T.$is_bool || T.$has_method(from_json_value) || T.$has_method(from_json_value_auto) || !T.$is_structural
-    return value.to_type[T]() ! throw .type { message: "'" + path + "' should be " + expected_kind[T]() }
+    return value.to_type[T]() ! throw .type("'" + path + "' should be " + expected_kind[T](), 0, 0)
     #else
-    if !value.is_object : throw .type { message: "'" + path + "' should be a mapping" }
+    if !value.is_object : throw .type("'" + path + "' should be a mapping", 0, 0)
     let source = value.object
     let result = T {
         #loop properties T as prop
@@ -35,7 +35,7 @@ fn value_to[T](value: json.Value, path: String) T !Error {
             if field.is_null : return prop.$default_value
             return value_to[prop](field, key) !>
             #else
-            let field = source.get(name) ! throw .type { message: "'" + key + "' is missing" }
+            let field = source.get(name) ! throw .type("'" + key + "' is missing", 0, 0)
             return value_to[prop](field, key) !>
             #end
             #end
@@ -131,7 +131,7 @@ extend Array[YAML_ITEM] {
     }
 
     - static fn from_yaml_value(value: json.Value, path: String) SELF !Error {
-        if !value.is_array : throw .type { message: "'" + path + "' should be a sequence" }
+        if !value.is_array : throw .type("'" + path + "' should be a sequence", 0, 0)
         let result = SELF.new()
         each value.array as item, index {
             result.append(value_to[YAML_ITEM](item, path + "[" + index + "]") !>)
@@ -151,7 +151,7 @@ extend HashMap[YAML_KEY, YAML_VALUE] {
     }
 
     - static fn from_yaml_value(value: json.Value, path: String) SELF !Error {
-        if !value.is_object : throw .type { message: "'" + path + "' should be a mapping" }
+        if !value.is_object : throw .type("'" + path + "' should be a mapping", 0, 0)
         let result = SELF.new()
         each value.object as item, key {
             let item_path = path.is_empty() ? key : path + "." + key
@@ -169,11 +169,11 @@ extend HashMap[YAML_KEY, YAML_VALUE] {
     }
 
     - static fn from_yaml_value(value: json.Value, path: String) SELF !Error {
-        if !value.is_object : throw .type { message: "'" + path + "' should be a mapping" }
+        if !value.is_object : throw .type("'" + path + "' should be a mapping", 0, 0)
         let result = SELF.new()
         each value.object as item, key {
             let item_path = path.is_empty() ? key : path + "." + key
-            let number = key.to(YAML_KEY) ! throw .type { message: "'" + item_path + "' should have an integer key" }
+            let number = key.to(YAML_KEY) ! throw .type("'" + item_path + "' should have an integer key", 0, 0)
             result.set(number, value_to[YAML_VALUE](item, item_path) !>)
         }
         return result
@@ -192,7 +192,7 @@ extend FlatMap[YAML_FLAT_KEY, YAML_FLAT_VALUE] {
     }
 
     - static fn from_yaml_value(value: json.Value, path: String) SELF !Error {
-        if !value.is_object : throw .type { message: "'" + path + "' should be a mapping" }
+        if !value.is_object : throw .type("'" + path + "' should be a mapping", 0, 0)
         let result = SELF.new()
         each value.object as item, key {
             let item_path = path.is_empty() ? key : path + "." + key
@@ -213,7 +213,7 @@ extend HashSet[YAML_SET_ITEM] {
     }
 
     - static fn from_yaml_value(value: json.Value, path: String) SELF !Error {
-        if !value.is_array : throw .type { message: "'" + path + "' should be a sequence" }
+        if !value.is_array : throw .type("'" + path + "' should be a sequence", 0, 0)
         let result = SELF.new()
         each value.array as item, index {
             result.add(value_to[YAML_SET_ITEM](item, path + "[" + index + "]") !>)
@@ -232,7 +232,7 @@ extend Deque[YAML_DEQUE_ITEM] {
     }
 
     - static fn from_yaml_value(value: json.Value, path: String) SELF !Error {
-        if !value.is_array : throw .type { message: "'" + path + "' should be a sequence" }
+        if !value.is_array : throw .type("'" + path + "' should be a sequence", 0, 0)
         let result = SELF.new()
         each value.array as item, index {
             result.push_back(value_to[YAML_DEQUE_ITEM](item, path + "[" + index + "]") !>)

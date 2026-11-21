@@ -244,7 +244,7 @@ class Parser {
         this.nodes += anchor.size
         this.expanded += anchor.size
         if this.expanded > ALIAS_LIMIT && this.expanded > (this.nodes - this.expanded) * ALIAS_RATIO {
-            throw .limit { message: "Aliases expand to too many values", line: this.line_of(pos), column: this.column_of(pos) }
+            throw .limit("Aliases expand to too many values", this.line_of(pos), this.column_of(pos))
         }
         return anchor.value
     }
@@ -266,7 +266,7 @@ class Parser {
     fn enter() !Error {
         this.depth++
         if this.depth > MAX_DEPTH {
-            throw .limit { message: "Values nest deeper than " + MAX_DEPTH + " levels", line: this.line_of(this.at), column: this.column_of(this.at) }
+            throw .limit("Values nest deeper than " + MAX_DEPTH + " levels", this.line_of(this.at), this.column_of(this.at))
         }
     }
 
@@ -304,13 +304,13 @@ class Parser {
         this.fail_at(this.at, message) !>
     }
     fn fail_at(pos: uint, message: String) !Error $throw {
-        throw .syntax { message: message, line: this.line_of(pos), column: this.column_of(pos) }
+        throw .syntax(message, this.line_of(pos), this.column_of(pos))
     }
     fn fail_type(message: String) !Error $throw {
-        throw .type { message: message, line: this.line_of(this.at), column: this.column_of(this.at) }
+        throw .type(message, this.line_of(this.at), this.column_of(this.at))
     }
     fn fail_duplicate(pos: uint, key: String) !Error $throw {
-        throw .duplicate { message: "The key '" + key + "' is given twice", line: this.line_of(pos), column: this.column_of(pos) }
+        throw .duplicate("The key '" + key + "' is given twice", this.line_of(pos), this.column_of(pos))
     }
 }
 

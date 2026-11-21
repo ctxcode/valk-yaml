@@ -3,7 +3,7 @@
 YAML for [Valk](https://valk-lang.dev): reading and writing YAML 1.2, straight into and out of
 your own classes. Purely written in Valk, with no os-package dependencies.
 
-Requires Valk 0.8.10 or newer.
+Requires Valk 0.9.1 or newer.
 
 ## Install
 
@@ -114,9 +114,10 @@ so they read back as floats.
 
 ## Errors
 
-`syntax`, `duplicate` (a key given twice), `type` (a tag or a class field that does not fit) and
-`limit` (an alias bomb, or nesting too deep), each with the `line` and `column` where the reader
-stopped:
+`yaml.Error` is a tagged union with variants `.syntax(message, line, column)`,
+`.duplicate(message, line, column)` (a key given twice), `.type(message, line, column)` (a tag or
+a class field that does not fit), and `.limit(message, line, column)` (an alias bomb, or nesting
+too deep), with `E.message`, `E.line`, `E.column`, and `E.to_string()` getters:
 
 ```rust
 yaml.decode(text) ! {

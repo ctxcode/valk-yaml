@@ -3,11 +3,12 @@ use yaml
 // Whether reading `text` throws `code` at `line` and `column`; a line of 0 is not checked
 fn fails(text: String, code: String, line: uint, column: uint) bool {
     yaml.decode_all(text) ! {
-        let got = "other"
-        if error_is(E.code, syntax) : got = "syntax"
-        else if error_is(E.code, duplicate) : got = "duplicate"
-        else if error_is(E.code, type) : got = "type"
-        else if error_is(E.code, limit) : got = "limit"
+        let got = match E : String {
+            .syntax(_, _, _) => "syntax"
+            .duplicate(_, _, _) => "duplicate"
+            .type(_, _, _) => "type"
+            .limit(_, _, _) => "limit"
+        }
         if got != code || (line > 0 && (E.line != line || E.column != column)) {
             println("\"" + text.escape() + "\": " + E.message + " at line " + E.line + ", column " + E.column)
             return false
@@ -66,7 +67,7 @@ test "Tags that do not fit" {
 
 test "More than one document" {
     yaml.decode("a: 1\n---\nb: 2\n") ! {
-        assert(error_is(E.code, syntax))
+        assert(E is .syntax)
         assert(E.line == 2)
         return
     }
@@ -86,7 +87,7 @@ h: &h [*g, *g, *g, *g, *g, *g, *g, *g, *g, *g]
 i: &i [*h, *h, *h, *h, *h, *h, *h, *h, *h, *h]
 "
     yaml.decode(text) ! {
-        assert(error_is(E.code, limit))
+        assert(E is .limit)
         assert(E.line > 0)
         return
     }
@@ -100,4 +101,13 @@ test "Nesting is bounded" {
 
 test "An anchor is not known inside itself" {
     assert(fails("a: &a [*a]\n", "syntax", 1, 8))
+}
+
+test "Error fields and string conversion" {
+    let err: yaml.Error = .syntax("bad yaml", 4, 2)
+    assert(err is .syntax)
+    assert(err.message == "bad yaml")
+    assert(err.line == 4 && err.column == 2)
+    assert(err.to_string() == "bad yaml")
+    assert("%{err}" == "bad yaml")
 }

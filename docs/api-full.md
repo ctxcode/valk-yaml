@@ -7,26 +7,6 @@ Namespaces: [main](#main)
 
 # main
 
-## Errors for 'main'
-
-```js
-// Thrown when text is not YAML, or does not fit what it is read into.
-+ error Error (syntax, duplicate, type, limit) payload { message: String, line: uint (0), column: uint (0) }
-```
-
-### Error
-
-Thrown when text is not YAML, or does not fit what it is read into.
-
-- `syntax`: the text does not read as YAML.
-- `duplicate`: a mapping has the same key twice.
-- `type`: a value is not what its tag or the type it is read into needs.
-- `limit`: aliases expand to too many values, or values nest too deep.
-
-`line` and `column` say where the reader stopped, counting from one, so the message can be
-shown against the file. They are 0 for `type` errors from `decode_to`, whose message names the
-key instead.
-
 ## Functions for 'main'
 
 ```js
@@ -113,3 +93,33 @@ Writes a class or struct of your own as YAML, the way `json.from` would read it;
 
 Field tags control encoding: `$tag(yaml: "name")` (or `` `yaml: "name"` ``) renames a key,
 `$tag(yaml: "-")` skips a field, and `$tag(omitempty)` omits zero, empty, or null values.
+
+## Classes for 'main'
+
+```js
+// Thrown when text is not YAML, or does not fit what it is read into.
++ union Error {
+    syntax(String, uint, uint)
+    duplicate(String, uint, uint)
+    type(String, uint, uint)
+    limit(String, uint, uint)
+
+    + get column: uint
+    + get line: uint
+    + get message: String
+    + fn to_string() String
+}
+```
+
+### Error
+
+Thrown when text is not YAML, or does not fit what it is read into.
+
+Each variant carries `(message, line, column)`. `line` and `column` say where the reader
+stopped, counting from one, so the message can be shown against the file. They are `0` for
+`type` errors from `decode_to`, whose message names the key instead.
+
+- `syntax(message, line, column)`: the text does not read as YAML.
+- `duplicate(message, line, column)`: a mapping has the same key twice.
+- `type(message, line, column)`: a value is not what its tag or the type it is read into needs.
+- `limit(message, line, column)`: aliases expand to too many values, or values nest too deep.

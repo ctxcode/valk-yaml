@@ -49,7 +49,7 @@ servers:
 
 test "Fields that do not fit name their key" {
     yaml.decode_to[Settings]("debug: true\nserver: {}\n") ! {
-        assert(error_is(E.code, type))
+        assert(E is .type)
         assert(E.message == "'name' is missing")
         return
     }
@@ -58,7 +58,7 @@ test "Fields that do not fit name their key" {
 
 test "Fields of the wrong type name their key" {
     yaml.decode_to[Settings]("name: x\nserver:\n  port: high\n") ! {
-        assert(error_is(E.code, type))
+        assert(E is .type)
         assert(E.message.contains("'server.port'"))
         return
     }
@@ -67,7 +67,7 @@ test "Fields of the wrong type name their key" {
 
 test "A syntax error still says where" {
     yaml.decode_to[Settings]("name: [x\n") ! {
-        assert(error_is(E.code, syntax))
+        assert(E is .syntax)
         assert(E.line == 1)
         return
     }

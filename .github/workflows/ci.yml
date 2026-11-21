@@ -9,7 +9,7 @@ on:
     branches: [ main ]
 
 env:
-  VALK_VERSION: "0.8.10"
+  VALK_VERSION: "0.9.1"
 
 jobs:
   test:

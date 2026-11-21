@@ -7,13 +7,6 @@ Namespaces: [main](#main)
 
 # main
 
-## Errors for 'main'
-
-```js
-// Thrown when text is not YAML, or does not fit what it is read into.
-+ error Error (syntax, duplicate, type, limit) payload { message: String, line: uint (0), column: uint (0) }
-```
-
 ## Functions for 'main'
 
 ```js
@@ -29,4 +22,21 @@ Namespaces: [main](#main)
 + fn encode_all(documents: Array[Value]) String
 // Writes a class or struct of your own as YAML, the way `json.from` would read it; a `time.DateTime` field is written as a date and time in UTC.
 + fn encode_of(value: $T) String
+```
+
+## Classes for 'main'
+
+```js
+// Thrown when text is not YAML, or does not fit what it is read into.
++ union Error {
+    syntax(String, uint, uint)
+    duplicate(String, uint, uint)
+    type(String, uint, uint)
+    limit(String, uint, uint)
+
+    + get column: uint
+    + get line: uint
+    + get message: String
+    + fn to_string() String
+}
 ```
