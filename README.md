@@ -8,7 +8,7 @@ Requires Valk 0.9.1 or newer.
 ## Install
 
 ```
-vman install github.com/ctxcode/valk-yaml
+vman install github.com/zikue/valk-yaml
 ```
 
 ## Example
